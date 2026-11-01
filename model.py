@@ -4022,3 +4022,102 @@ def boundary_view(ids, b, sep="|"):
 
     return result
 
+# Step 37 - boundary_alignment
+def boundary_alignment(ids, b):
+    """
+    Measure router boundary alignment with the SpaceByte-style rule.
+
+    Args:
+        ids (torch.Tensor): Byte tensor of shape (B, L).
+        b (torch.Tensor): Boolean router boundary tensor of shape (B, L).
+
+    Returns:
+        dict: Three Python float metrics:
+            on_space
+            after_space
+            space_recall
+    """
+
+    # Validate input shapes.
+    if ids.ndim != 2 or b.ndim != 2:
+        raise ValueError("ids and b must both have shape (B, L).")
+
+    if ids.shape != b.shape:
+        raise ValueError("ids and b must have matching shapes.")
+
+    if b.dtype != torch.bool:
+        raise TypeError("b must be a boolean tensor.")
+
+    if ids.device != b.device:
+        raise ValueError("ids and b must be on the same device.")
+
+    B, L = ids.shape
+
+    # Handle empty sequences.
+    if L == 0:
+        return {
+            "on_space": 0.0,
+            "after_space": 0.0,
+            "space_recall": 0.0
+        }
+
+    # Calculate SpaceByte-style boundaries.
+    s = space_boundaries(ids)
+
+    # Create a mask identifying positions immediately after
+    # a space-like boundary.
+    after = torch.zeros_like(s)
+
+    if L > 1:
+        after[:, 1:] = s[:, :-1]
+
+    # Ignore column zero because it is always a forced boundary.
+    b_valid = b[:, 1:]
+    s_valid = s[:, 1:]
+    after_valid = after[:, 1:]
+
+    # Count router boundaries outside column zero.
+    num_boundaries = b_valid.sum()
+
+    # Count space-like positions outside column zero.
+    num_space = s_valid.sum()
+
+    # If there are no router boundaries, all metrics are zero.
+    if num_boundaries.item() == 0:
+        return {
+            "on_space": 0.0,
+            "after_space": 0.0,
+            "space_recall": 0.0
+        }
+
+    # Count router boundaries occurring directly on space-like positions.
+    aligned_on_space = (b_valid & s_valid).sum()
+
+    # Count router boundaries occurring immediately after
+    # space-like positions.
+    aligned_after_space = (b_valid & after_valid).sum()
+
+    # Calculate the fraction of boundaries occurring on spaces.
+    on_space = (
+        aligned_on_space.float() / num_boundaries.float()
+    ).item()
+
+    # Calculate the fraction of boundaries occurring after spaces.
+    after_space = (
+        aligned_after_space.float() / num_boundaries.float()
+    ).item()
+
+    # Calculate recall of the space-like boundary positions.
+    if num_space.item() > 0:
+        space_recall = (
+            aligned_on_space.float() / num_space.float()
+        ).item()
+    else:
+        space_recall = 0.0
+
+    return {
+        "on_space": float(on_space),
+        "after_space": float(after_space),
+        "space_recall": float(space_recall)
+    }
+

@@ -46,6 +46,7 @@ python scaffold.py
 - [x] **34.** stage_step
 - [x] **35.** stream_bytes
 - [x] **36.** boundary_view
+- [x] **37.** boundary_alignment
 
 ---
 
