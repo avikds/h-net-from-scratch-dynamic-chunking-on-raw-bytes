@@ -1394,3 +1394,308 @@ def build_stack(layout, d, d_state=16, head_dim=16, chunk=64, heads=4):
     # Return the complete sequential stack.
     return nn.Sequential(*layers)
 
+# Step 18 - HNetStage
+class HNetStage(nn.Module):
+    """
+    One recursive level of the hierarchical H-Net architecture.
+
+    Non-innermost stages perform:
+        Encoder -> Router -> Compaction -> Recursive Substage
+        -> Smoothing -> Upsampling -> Residual -> Decoder
+
+    The innermost stage directly applies its main network.
+    """
+
+    def __init__(self, layout, widths, targets, cfg=None, s=0):
+        super().__init__()
+
+        # Default configuration.
+        cfg = {} if cfg is None else cfg
+
+        # Current stage hidden dimension.
+        self.d = widths[s]
+
+        # Determine whether this is the innermost stage.
+        # A single layout entry represents the main network.
+        self.inner = len(layout) == 1
+
+        # --------------------------------------------------
+        # 1. Optional dimension padding
+        # --------------------------------------------------
+
+        # When a stage is wider than its preceding stage,
+        # introduce learnable zero-initialized padding.
+        if s > 0 and widths[s] > widths[s - 1]:
+            self.pad = nn.Parameter(
+                torch.zeros(widths[s] - widths[s - 1])
+            )
+        else:
+            self.pad = None
+
+        # Stack configuration shared by the stage networks.
+        stack_cfg = cfg.get("stack", {})
+
+        # --------------------------------------------------
+        # 2. Innermost stage
+        # --------------------------------------------------
+
+        if self.inner:
+
+            # Build the main network.
+            self.main = build_stack(
+                layout[0],
+                self.d,
+                **stack_cfg
+            )
+
+            # No router, encoder, decoder or recursive
+            # substage is required at the innermost level.
+            return
+
+        # --------------------------------------------------
+        # 3. Non-innermost stage
+        # --------------------------------------------------
+
+        if len(layout) != 3:
+            raise ValueError(
+                "A non-innermost layout must contain "
+                "[encoder, inner, decoder]."
+            )
+
+        if s >= len(targets):
+            raise ValueError("Missing compression target for stage.")
+
+        # Store configuration and compression target.
+        self.N = targets[s]
+        self.cfg = cfg
+
+        self.no_smoothing = cfg.get("no_smoothing", False)
+        self.no_ste = cfg.get("no_ste", False)
+
+        # --------------------------------------------------
+        # 4. Encoder
+        # --------------------------------------------------
+
+        self.encoder = build_stack(
+            layout[0],
+            self.d,
+            **stack_cfg
+        )
+
+        # --------------------------------------------------
+        # 5. Boundary router
+        # --------------------------------------------------
+
+        router_cls = cfg.get("router_cls", RoutingModule)
+
+        self.router = router_cls(self.d)
+
+        # --------------------------------------------------
+        # 6. Recursive substage
+        # --------------------------------------------------
+
+        self.sub = HNetStage(
+            layout[1],
+            widths,
+            targets,
+            cfg,
+            s + 1
+        )
+
+        # --------------------------------------------------
+        # 7. Decoder
+        # --------------------------------------------------
+
+        self.decoder = build_stack(
+            layout[2],
+            self.d,
+            **stack_cfg
+        )
+
+        # --------------------------------------------------
+        # 8. Zero-initialized residual projection
+        # --------------------------------------------------
+
+        self.res = nn.Linear(
+            self.d,
+            self.d
+        )
+
+        # Initialize residual projection to zero.
+        # Initially, the residual branch contributes zero.
+        with torch.no_grad():
+            self.res.weight.zero_()
+            self.res.bias.zero_()
+
+    def forward(self, x, mask, boundaries=None, stats=None):
+        """
+        Execute one recursive H-Net stage.
+
+        Args:
+            x (torch.Tensor):
+                Input tensor of shape (B, L, D).
+
+            mask (torch.Tensor):
+                Boolean validity mask of shape (B, L).
+
+            boundaries (torch.Tensor, optional):
+                Predefined boolean chunk boundaries of shape (B, L).
+                When supplied, the router is bypassed.
+
+            stats (list, optional):
+                List used to collect router and chunking statistics.
+
+        Returns:
+            torch.Tensor:
+                Output tensor with the same shape as the original input.
+        """
+
+        # Preserve the incoming feature dimension.
+        D = x.shape[-1]
+
+        # --------------------------------------------------
+        # 1. Optional dimension padding
+        # --------------------------------------------------
+
+        if self.pad is not None:
+
+            # Expand the learnable padding vector across
+            # all batch and sequence positions.
+            pad = self.pad.view(1, 1, -1).expand(
+                x.shape[0],
+                x.shape[1],
+                -1
+            )
+
+            # Append padding features.
+            x = torch.cat([x, pad], dim=-1)
+
+        # --------------------------------------------------
+        # 2. Innermost stage
+        # --------------------------------------------------
+
+        if self.inner:
+
+            # Apply the main network and restore the
+            # original incoming feature dimension.
+            return self.main(x)[..., :D]
+
+        # --------------------------------------------------
+        # 3. Encode input and calculate residual
+        # --------------------------------------------------
+
+        xhat = self.encoder(x)
+
+        # Residual projection.
+        r = self.res(xhat)
+
+        # --------------------------------------------------
+        # 4. Determine chunk boundaries
+        # --------------------------------------------------
+
+        if boundaries is not None:
+
+            # Use externally supplied boundaries.
+            # The mask suppresses invalid positions.
+            b = boundaries & mask
+
+            # Convert binary boundaries into floating-point
+            # probabilities.
+            p = b.to(dtype=xhat.dtype)
+
+        else:
+
+            # Predict probabilities and boundaries with the router.
+            p, b = self.router(xhat, mask)
+
+        # --------------------------------------------------
+        # 5. Collect optional statistics
+        # --------------------------------------------------
+
+        if stats is not None:
+
+            stats.append({
+                "p": p,
+                "b": b,
+                "mask": mask,
+                "N": self.N,
+                "learned": boundaries is None
+            })
+
+        # --------------------------------------------------
+        # 6. Compact the sequence
+        # --------------------------------------------------
+
+        # Keep boundary vectors and pack them to the left.
+        x2, mask2 = compact_chunks(xhat, b)
+
+        # Process the compressed sequence recursively.
+        zhat = self.sub(
+            x2,
+            mask2,
+            None,
+            stats
+        )
+
+        # --------------------------------------------------
+        # 7. Smooth uncertain chunks
+        # --------------------------------------------------
+
+        if boundaries is None and not self.no_smoothing:
+
+            # Compact router probabilities using the same
+            # boundary positions as the hidden vectors.
+            P, _ = compact_chunks(p, b)
+
+            # Apply exponential moving average smoothing.
+            zbar = smooth_chunks(zhat, P)
+
+        else:
+
+            # Skip smoothing for predefined boundaries
+            # or when smoothing is disabled.
+            zbar = zhat
+
+        # --------------------------------------------------
+        # 8. Causal upsampling
+        # --------------------------------------------------
+
+        # Restore the original byte-level sequence length.
+        zt = causal_upsample(zbar, b)
+
+        # Apply confidence only when boundaries are router-predicted.
+        if boundaries is None:
+
+            if self.no_ste:
+
+                # Ordinary confidence without the STE.
+                confidence = torch.where(
+                    b,
+                    p,
+                    1.0 - p
+                )
+
+            else:
+
+                # Straight-through confidence estimator.
+                confidence = straight_through_confidence(
+                    p,
+                    b
+                )
+
+            # Broadcast confidence over the feature dimension.
+            zt = zt * confidence.unsqueeze(-1)
+
+        # --------------------------------------------------
+        # 9. Residual addition and decoding
+        # --------------------------------------------------
+
+        # Combine upsampled hierarchical representations
+        # with the residual representation.
+        combined = zt + r
+
+        # Decode and restore the original incoming dimension.
+        output = self.decoder(combined)[..., :D]
+
+        return output
+

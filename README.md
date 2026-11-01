@@ -27,6 +27,7 @@ python scaffold.py
 - [x] **15.** apply_rope
 - [x] **16.** TransformerLayer
 - [x] **17.** build_stack
+- [x] **18.** HNetStage
 
 ---
 
