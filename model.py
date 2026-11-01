@@ -485,3 +485,38 @@ def causal_upsample(zbar, b):
 
     return ztilde
 
+# Step 10 - straight_through_confidence
+def straight_through_confidence(p, b):
+    """
+    Build a straight-through confidence multiplier.
+
+    Forward value is 1 at every position, while the backward
+    gradient is preserved from the confidence calculation.
+
+    Args:
+        p (torch.Tensor): Floating-point probability tensor.
+        b (torch.Tensor): Boolean boundary tensor of the same shape.
+
+    Returns:
+        torch.Tensor: Straight-through confidence multiplier.
+    """
+
+    if p.shape != b.shape:
+        raise ValueError("p and b must have the same shape.")
+
+    if not p.is_floating_point():
+        raise TypeError("p must be a floating-point tensor.")
+
+    if b.dtype != torch.bool:
+        raise TypeError("b must be a boolean tensor.")
+
+    # Calculate confidence:
+    # c = p for boundary positions, otherwise c = 1 - p.
+    c = torch.where(b, p, 1.0 - p)
+
+    # Straight-through estimator:
+    # Forward value is always 1, but gradients flow through c.
+    s = c + (1.0 - c).detach()
+
+    return s
+

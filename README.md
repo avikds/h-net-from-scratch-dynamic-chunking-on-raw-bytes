@@ -19,6 +19,7 @@ python scaffold.py
 - [x] **7.** compact_chunks
 - [x] **8.** smooth_chunks
 - [x] **9.** causal_upsample
+- [x] **10.** straight_through_confidence
 
 ---
 
