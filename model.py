@@ -627,3 +627,224 @@ class RMSNorm(nn.Module):
         # Normalize the input and apply the learnable scale.
         return x * inv_rms * self.weight
 
+# Step 13 - ssd_scan
+def ssd_scan(u, dt, A, B_mat, C_mat, h0=None, chunk=64):
+    """
+    Run Mamba-2's state-space recurrence using chunked matrix operations.
+
+    Args:
+        u:     Input tensor of shape (B, L, H, P).
+        dt:    Time-step tensor of shape (B, L, H).
+        A:     State transition parameters of shape (H,).
+        B_mat: Input state vectors of shape (B, L, N).
+        C_mat: Output state vectors of shape (B, L, N).
+        h0:    Optional initial state of shape (B, H, P, N).
+        chunk: Maximum number of positions processed per chunk.
+
+    Returns:
+        y: Final output tensor of shape (B, L, H, P).
+        h: Final state tensor of shape (B, H, P, N).
+    """
+
+    # Validate chunk size.
+    if not isinstance(chunk, int) or isinstance(chunk, bool) or chunk <= 0:
+        raise ValueError("chunk must be a positive integer.")
+
+    # Validate input dimensions.
+    if u.ndim != 4:
+        raise ValueError("u must have shape (B, L, H, P).")
+
+    if dt.ndim != 3:
+        raise ValueError("dt must have shape (B, L, H).")
+
+    if A.ndim != 1:
+        raise ValueError("A must have shape (H,).")
+
+    if B_mat.ndim != 3 or C_mat.ndim != 3:
+        raise ValueError("B_mat and C_mat must have shape (B, L, N).")
+
+    batch_size, seq_len, num_heads, head_dim = u.shape
+    num_states = B_mat.shape[-1]
+
+    if dt.shape != (batch_size, seq_len, num_heads):
+        raise ValueError("dt must have shape (B, L, H).")
+
+    if A.shape != (num_heads,):
+        raise ValueError("A must have shape (H,).")
+
+    if B_mat.shape != C_mat.shape:
+        raise ValueError("B_mat and C_mat must have matching shapes.")
+
+    if B_mat.shape[:2] != (batch_size, seq_len):
+        raise ValueError("B_mat and C_mat must match the batch and sequence dimensions.")
+
+    # Initialize the recurrent state.
+    if h0 is None:
+        h = u.new_zeros(
+            batch_size,
+            num_heads,
+            head_dim,
+            num_states
+        )
+    else:
+        if h0.shape != (
+            batch_size,
+            num_heads,
+            head_dim,
+            num_states
+        ):
+            raise ValueError("h0 must have shape (B, H, P, N).")
+
+        h = h0
+
+    # An empty sequence returns an empty output and the initial state.
+    if seq_len == 0:
+        return u.new_empty(
+            batch_size,
+            0,
+            num_heads,
+            head_dim
+        ), h
+
+    # Store the output produced by each chunk.
+    outputs = []
+
+    # Process the sequence in chunks.
+    for start in range(0, seq_len, chunk):
+
+        end = min(start + chunk, seq_len)
+
+        # Extract the current chunk.
+        u_c = u[:, start:end]
+        dt_c = dt[:, start:end]
+        B_c = B_mat[:, start:end]
+        C_c = C_mat[:, start:end]
+
+        # Compute a_t = A * dt_t.
+        a = dt_c * A.view(1, 1, num_heads)
+
+        # Compute the cumulative state-transition exponent.
+        # Shape: (B, T, H).
+        s = torch.cumsum(a, dim=1)
+
+        # Compute v_j = dt_j * u_j.
+        # Shape: (B, T, H, P).
+        v = dt_c.unsqueeze(-1) * u_c
+
+        # --------------------------------------------------
+        # 1. Within-chunk interactions
+        # --------------------------------------------------
+
+        # Calculate C_i^T * B_j for every pair of positions.
+        # Shape: (B, T, T).
+        CB = torch.einsum(
+            "bin,bjn->bij",
+            C_c,
+            B_c
+        )
+
+        # Calculate s_i - s_j.
+        # Shape: (B, T, T, H).
+        delta = (
+            s.unsqueeze(2)
+            - s.unsqueeze(1)
+        )
+
+        T = end - start
+
+        # Construct a lower-triangular causal mask.
+        lower_mask = torch.tril(
+            torch.ones(
+                T,
+                T,
+                dtype=torch.bool,
+                device=u.device
+            )
+        )
+
+        # Suppress future-position interactions before exponentiation.
+        # This also avoids unnecessary exponential overflow.
+        delta = delta.masked_fill(
+            ~lower_mask.unsqueeze(0).unsqueeze(-1),
+            float("-inf")
+        )
+
+        # Calculate exp(s_i - s_j).
+        # Shape: (B, T, T, H).
+        decay = torch.exp(delta)
+
+        # Combine the C-B interaction with the decay factor.
+        # Shape: (B, T, T, H).
+        weights = CB.unsqueeze(-1) * decay
+
+        # Sum the contributions from all previous positions.
+        # Shape: (B, T, H, P).
+        y_chunk = torch.einsum(
+            "bijh,bjhp->bihp",
+            weights,
+            v
+        )
+
+        # --------------------------------------------------
+        # 2. Contribution from the incoming state
+        # --------------------------------------------------
+
+        # Calculate C_i^T * h_in.
+        # Shape: (B, T, H, P).
+        initial_output = torch.einsum(
+            "bin,bhpn->bihp",
+            C_c,
+            h
+        )
+
+        # Multiply by exp(s_i).
+        # Shape: (B, T, H, P).
+        initial_output = (
+            torch.exp(s).unsqueeze(-1)
+            * initial_output
+        )
+
+        # Combine within-chunk and incoming-state contributions.
+        y_chunk = y_chunk + initial_output
+
+        outputs.append(y_chunk)
+
+        # --------------------------------------------------
+        # 3. Compute the outgoing state
+        # --------------------------------------------------
+
+        # The last cumulative exponent in this chunk.
+        s_last = s[:, -1, :]
+
+        # Calculate exp(s_last - s_j).
+        # Shape: (B, T, H).
+        final_decay = torch.exp(
+            s_last.unsqueeze(1) - s
+        )
+
+        # Calculate the accumulated input contribution:
+        #
+        # sum_j exp(s_last - s_j) * B_j * v_j
+        #
+        # Result shape: (B, H, P, N).
+        state_update = torch.einsum(
+            "bjh,bjn,bjhp->bhpn",
+            final_decay,
+            B_c,
+            v
+        )
+
+        # Propagate the incoming state through the chunk.
+        # Shape: (B, H, P, N).
+        propagated_state = (
+            torch.exp(s_last)[:, :, None, None] * h
+        )
+
+        # Update the state for the next chunk.
+        h = propagated_state + state_update
+
+    # Concatenate chunk outputs along the sequence dimension.
+    y = torch.cat(outputs, dim=1)
+
+    return y, h
+
