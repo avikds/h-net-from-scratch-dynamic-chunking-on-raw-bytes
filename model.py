@@ -429,3 +429,59 @@ def smooth_chunks(z, P):
     # Stack all smoothed vectors along the sequence dimension.
     return torch.stack(smoothed_outputs, dim=1)
 
+# Step 9 - causal_upsample
+def causal_upsample(zbar, b):
+    """
+    Stretch compressed chunk vectors back to byte-level resolution.
+
+    Args:
+        zbar (torch.Tensor): Smoothed chunk representations of shape
+                             (B, M, d).
+
+        b (torch.Tensor): Boolean boundary tensor of shape (B, L),
+                          with b[:, 0] being True.
+
+    Returns:
+        torch.Tensor: Upsampled representations of shape (B, L, d).
+    """
+
+    # Validate input dimensions.
+    if zbar.ndim != 3:
+        raise ValueError("zbar must have shape (B, M, d).")
+
+    if b.ndim != 2:
+        raise ValueError("b must have shape (B, L).")
+
+    if b.shape[0] != zbar.shape[0]:
+        raise ValueError("Batch dimensions of zbar and b must match.")
+
+    if b.dtype != torch.bool:
+        raise TypeError("b must be a boolean tensor.")
+
+    if b.device != zbar.device:
+        raise ValueError("zbar and b must be on the same device.")
+
+    B, L = b.shape
+    d = zbar.shape[2]
+
+    # Ensure the first byte of every non-empty sequence is a boundary.
+    if B > 0 and L > 0 and not b[:, 0].all():
+        raise ValueError("The first position of every row must be True.")
+
+    # Calculate the chunk index associated with every byte position.
+    # Subtracting one converts the cumulative boundary count
+    # into a zero-based chunk index.
+    chunk_indices = b.long().cumsum(dim=1) - 1
+
+    # Expand indices across the feature dimension.
+    gather_indices = chunk_indices.unsqueeze(-1).expand(-1, -1, d)
+
+    # Gather the most recent chunk representation for each byte.
+    ztilde = torch.gather(
+        zbar,
+        dim=1,
+        index=gather_indices
+    )
+
+    return ztilde
+
