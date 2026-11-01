@@ -145,3 +145,32 @@ def bits_per_byte(logits, targets):
 
     return bpb.item()
 
+# Step 4 - pool_boundaries
+def pool_boundaries(ids, k):
+    """
+    Mark every k-th position as a chunk boundary.
+
+    Args:
+        ids (torch.Tensor): Input tensor of shape (B, L).
+        k (int): Fixed chunk width.
+
+    Returns:
+        torch.Tensor: Boolean tensor of shape (B, L),
+                      True at positions 0, k, 2k, ... .
+    """
+
+    if ids.ndim != 2:
+        raise ValueError("ids must have shape (B, L).")
+
+    if k <= 0:
+        raise ValueError("k must be a positive integer.")
+
+    # Generate position indices on the same device as ids.
+    positions = torch.arange(ids.shape[1], device=ids.device)
+
+    # Mark positions divisible by k as chunk boundaries.
+    boundaries = (positions % k == 0)
+
+    # Expand the same boundary pattern across every batch row.
+    return boundaries.unsqueeze(0).expand(ids.shape[0], -1)
+

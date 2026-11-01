@@ -13,6 +13,7 @@ python scaffold.py
 - [x] **1.** load_corpus
 - [x] **2.** sample_batch
 - [x] **3.** bits_per_byte
+- [x] **4.** pool_boundaries
 
 ---
 
