@@ -24,6 +24,7 @@ python scaffold.py
 - [x] **12.** RMSNorm
 - [x] **13.** ssd_scan
 - [x] **14.** MambaLayer
+- [x] **15.** apply_rope
 
 ---
 

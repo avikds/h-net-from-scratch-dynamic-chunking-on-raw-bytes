@@ -1080,3 +1080,78 @@ class MambaLayer(nn.Module):
 
         return residual + out
 
+# Step 15 - apply_rope
+def apply_rope(x, offset=0, theta=10000.0):
+    """
+    Apply Rotary Positional Embeddings to attention head vectors.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (B, H, L, hd).
+        offset (int): Starting position offset.
+        theta (float): RoPE frequency base.
+
+    Returns:
+        torch.Tensor: Rotated tensor with the same shape and dtype as x.
+    """
+
+    # Validate input dimensions.
+    if x.ndim != 4:
+        raise ValueError("x must have shape (B, H, L, hd).")
+
+    B, H, L, hd = x.shape
+
+    # RoPE requires an even head dimension.
+    if hd % 2 != 0:
+        raise ValueError("The head dimension must be even.")
+
+    if theta <= 0:
+        raise ValueError("theta must be positive.")
+
+    # Half of the head dimension.
+    m = hd // 2
+
+    # Use float64 for double inputs and float32 for other input types
+    # to improve numerical stability when calculating frequencies.
+    compute_dtype = (
+        torch.float64 if x.dtype == torch.float64 else torch.float32
+    )
+
+    # Generate indices for the inverse frequencies.
+    freq_indices = torch.arange(
+        m,
+        device=x.device,
+        dtype=compute_dtype
+    )
+
+    # Calculate inverse frequencies.
+    inv_freq = 1.0 / (theta ** (freq_indices / m))
+
+    # Generate sequence positions, including the optional offset.
+    positions = torch.arange(
+        L,
+        device=x.device,
+        dtype=compute_dtype
+    ) + offset
+
+    # Calculate position-dependent angles.
+    angles = positions[:, None] * inv_freq[None, :]
+
+    # Calculate cosine and sine.
+    cos_angles = torch.cos(angles).to(dtype=x.dtype)
+    sin_angles = torch.sin(angles).to(dtype=x.dtype)
+
+    # Reshape for broadcasting across batch and attention heads.
+    cos_angles = cos_angles[None, None, :, :]
+    sin_angles = sin_angles[None, None, :, :]
+
+    # Split the head dimension into two equal halves.
+    a = x[..., :m]
+    b = x[..., m:]
+
+    # Apply rotary transformation.
+    first_half = a * cos_angles - b * sin_angles
+    second_half = b * cos_angles + a * sin_angles
+
+    # Concatenate the rotated halves.
+    return torch.cat([first_half, second_half], dim=-1)
+
