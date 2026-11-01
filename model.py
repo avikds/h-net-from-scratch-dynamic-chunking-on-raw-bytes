@@ -2512,3 +2512,231 @@ def evaluate_bpb(
         "bytes_per_chunk": bytes_per_chunk
     }
 
+# Step 26 - train_hnet
+def train_hnet(
+    model,
+    data,
+    steps,
+    chunker=None,
+    batch_size=16,
+    seq_len=128,
+    lr=1e-3,
+    weight_decay=0.1,
+    alpha=0.03,
+    seed=0,
+    log_every=0,
+    lr_mod=True
+):
+    """
+    Train a byte-level H-Net language model end to end.
+
+    Returns:
+        dict containing:
+            seconds: Total training duration.
+            trace: Training statistics recorded during training.
+    """
+
+    # Validate inputs.
+    if not isinstance(steps, int) or isinstance(steps, bool) or steps <= 0:
+        raise ValueError("steps must be a positive integer.")
+
+    if batch_size <= 0 or seq_len <= 0:
+        raise ValueError("batch_size and seq_len must be positive.")
+
+    if log_every < 0:
+        raise ValueError("log_every must be non-negative.")
+
+    if data.ndim != 1:
+        raise ValueError("data must be a 1-D tensor.")
+
+    if len(data) <= seq_len + 1:
+        raise ValueError("data must contain more than seq_len + 1 bytes.")
+
+    # Initialize reproducible batch sampling.
+    generator = torch.Generator().manual_seed(seed)
+
+    sampling_data = data.detach().to(
+        device="cpu",
+        dtype=torch.long
+    )
+
+    # Identify the model's device.
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = sampling_data.device
+
+    # Calculate stage-wise learning-rate multipliers.
+    if lr_mod:
+        mults = lr_multipliers(
+            model.targets,
+            model.widths
+        )
+    else:
+        mults = [1.0] * len(model.widths)
+
+    # Build stage-specific optimizer parameter groups.
+    param_groups = stage_param_groups(
+        model,
+        base_lr=lr,
+        weight_decay=weight_decay,
+        mults=mults
+    )
+
+    # Initialize AdamW.
+    optimizer = torch.optim.AdamW(
+        param_groups,
+        lr=lr,
+        betas=(0.9, 0.95)
+    )
+
+    model.train()
+
+    trace = []
+    start_time = time.perf_counter()
+
+    # Training loop: step indices are zero-based.
+    for step in range(steps):
+
+        # Update learning rates using the WSD schedule.
+        schedule_factor = wsd_factor(step, steps)
+
+        for group in optimizer.param_groups:
+            group["lr"] = (
+                lr * group["lr_mult"] * schedule_factor
+            )
+
+        # Sample a training batch.
+        x, y = sample_batch(
+            sampling_data,
+            batch_size,
+            seq_len,
+            generator
+        )
+
+        x = x.to(device)
+        y = y.to(device)
+
+        # Generate optional predefined boundaries.
+        boundaries = None
+
+        if chunker is not None:
+            boundaries = chunker(x)
+
+            if boundaries.shape != x.shape:
+                raise ValueError(
+                    "chunker must return a boundary tensor "
+                    "with the same shape as x."
+                )
+
+            if boundaries.dtype != torch.bool:
+                raise TypeError(
+                    "chunker must return a boolean boundary tensor."
+                )
+
+        optimizer.zero_grad(set_to_none=True)
+
+        # Forward pass.
+        logits, stats = model(
+            x,
+            boundaries=boundaries
+        )
+
+        # Mean next-byte cross-entropy in nats.
+        ce_loss = F.cross_entropy(
+            logits.reshape(-1, 256),
+            y.reshape(-1),
+            reduction="mean"
+        )
+
+        # Calculate ratio regularization for learned routers.
+        ratio_total = ce_loss.new_zeros(())
+
+        for s in stats:
+            if s["learned"]:
+                ratio_total = ratio_total + ratio_loss(
+                    s["p"],
+                    s["b"],
+                    s["N"],
+                    s["mask"]
+                )
+
+        # Combined training objective.
+        loss = ce_loss + alpha * ratio_total
+
+        # Backpropagation.
+        loss.backward()
+
+        # Clip the global gradient norm.
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            max_norm=1.0
+        )
+
+        optimizer.step()
+
+        # Record statistics periodically and always at the final step.
+        is_final_step = (step == steps - 1)
+
+        should_log = (
+            (log_every > 0 and step % log_every == 0)
+            or is_final_step
+        )
+
+        if should_log:
+
+            # Convert cross-entropy from nats to bits per byte.
+            batch_bpb = ce_loss.detach().item() / math.log(2.0)
+
+            bytes_per_chunk = []
+            mean_p = []
+
+            for s in stats:
+
+                # Cumulative bytes per retained position.
+                kept = s["b"].sum().item()
+
+                if kept <= 0:
+                    raise RuntimeError(
+                        "A chunking stage retained zero positions."
+                    )
+
+                compression = (
+                    seq_len * batch_size / kept
+                )
+
+                bytes_per_chunk.append(float(compression))
+
+                # Mean router probability over valid positions.
+                p = s["p"]
+                mask = s["mask"]
+
+                if mask is not None:
+                    valid_p = p[mask]
+                else:
+                    valid_p = p.reshape(-1)
+
+                mean_probability = (
+                    valid_p.mean().item()
+                    if valid_p.numel() > 0
+                    else 0.0
+                )
+
+                mean_p.append(float(mean_probability))
+
+            # IMPORTANT: Record the zero-based step index.
+            trace.append({
+                "step": step,
+                "bpb": float(batch_bpb),
+                "bytes_per_chunk": bytes_per_chunk,
+                "mean_p": mean_p
+            })
+
+    # Calculate total training duration.
+    seconds = time.perf_counter() - start_time
+
+    return {
+        "seconds": float(seconds),
+        "trace": trace
+    }
+

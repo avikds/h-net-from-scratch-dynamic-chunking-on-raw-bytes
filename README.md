@@ -35,6 +35,7 @@ python scaffold.py
 - [x] **23.** layer_flops
 - [x] **24.** flops_per_byte
 - [x] **25.** evaluate_bpb
+- [x] **26.** train_hnet
 
 ---
 
