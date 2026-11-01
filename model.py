@@ -2050,3 +2050,149 @@ def wsd_factor(step, total, warmup=0.1, decay=0.2, floor=0.1):
 
     return float(factor)
 
+# Step 23 - layer_flops
+def layer_flops(
+    kind,
+    L,
+    d,
+    heads=4,
+    d_ff=None,
+    expand=2,
+    d_state=16,
+    head_dim=16,
+    d_conv=4
+):
+    """
+    Calculate forward-pass FLOPs for one Transformer or Mamba-2 layer.
+
+    Args:
+        kind (str): "T" for Transformer or "m" for Mamba-2.
+        L (int or float): Sequence length; may be fractional.
+        d (int): Model hidden dimension.
+        heads (int): Number of Transformer attention heads.
+        d_ff (int, optional): Transformer feed-forward dimension.
+        expand (int): Mamba expansion factor.
+        d_state (int): Mamba state dimension.
+        head_dim (int): Mamba head dimension.
+        d_conv (int): Mamba convolution kernel size.
+
+    Returns:
+        int or float: Estimated forward-pass FLOPs.
+    """
+
+    # Validate common dimensions.
+    if L < 0:
+        raise ValueError("L must be non-negative.")
+
+    if d <= 0:
+        raise ValueError("d must be positive.")
+
+    # --------------------------------------------------
+    # 1. Transformer FLOPs
+    # --------------------------------------------------
+
+    if kind == "T":
+
+        if heads <= 0:
+            raise ValueError("heads must be positive.")
+
+        # Default feed-forward dimension.
+        f = d_ff if d_ff is not None else int(8 * d / 3)
+
+        if f <= 0:
+            raise ValueError("d_ff must be positive.")
+
+        # QKV projections: 3 linear projections.
+        qkv_flops = 2 * 3 * L * d * d
+
+        # Attention logits: Q multiplied by K transpose.
+        attention_logits = 2 * L**2 * d
+
+        # Softmax computation across attention heads.
+        softmax_flops = 3 * heads * L**2
+
+        # Attention scores multiplied by V.
+        attention_value = 2 * L**2 * d
+
+        # Attention output projection.
+        output_projection = 2 * L * d**2
+
+        # Three gated MLP projections.
+        mlp_projections = 2 * L * d * 3 * f
+
+        # Gated MLP activation and element-wise operations.
+        gating_flops = 5 * L * d
+
+        total = (
+            qkv_flops
+            + attention_logits
+            + softmax_flops
+            + attention_value
+            + output_projection
+            + mlp_projections
+            + gating_flops
+        )
+
+    # --------------------------------------------------
+    # 2. Mamba-2 FLOPs
+    # --------------------------------------------------
+
+    elif kind == "m":
+
+        if expand <= 0:
+            raise ValueError("expand must be positive.")
+
+        if d_state <= 0:
+            raise ValueError("d_state must be positive.")
+
+        if head_dim <= 0:
+            raise ValueError("head_dim must be positive.")
+
+        if d_conv <= 0:
+            raise ValueError("d_conv must be positive.")
+
+        # Expanded inner dimension.
+        e = expand
+
+        # Number of Mamba heads.
+        H = (e * d) // head_dim
+
+        if H <= 0:
+            raise ValueError("Invalid Mamba head configuration.")
+
+        # X and Z input projections.
+        xz_projections = 2 * L * d * (2 * e * d)
+
+        # B, C and delta-t projections.
+        bcdt_projections = (
+            2 * L * d * (2 * d_state + H)
+        )
+
+        # State Space Duality (SSD) computation.
+        ssd_flops = 2 * 3 * L * (e * d) * d_state
+
+        # Depthwise causal convolution.
+        conv_flops = 2 * L * d_conv * d
+
+        # Gating operations.
+        gating_flops = 5 * L * d
+
+        # Output projection back to dimension d.
+        output_projection = 2 * L * d**2
+
+        total = (
+            xz_projections
+            + bcdt_projections
+            + ssd_flops
+            + conv_flops
+            + gating_flops
+            + output_projection
+        )
+
+    else:
+        raise ValueError(
+            f"Unknown layer kind: {kind!r}. Use 'T' or 'm'."
+        )
+
+    return total
+

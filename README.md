@@ -32,6 +32,7 @@ python scaffold.py
 - [x] **20.** lr_multipliers
 - [x] **21.** stage_param_groups
 - [x] **22.** wsd_factor
+- [x] **23.** layer_flops
 
 ---
 
