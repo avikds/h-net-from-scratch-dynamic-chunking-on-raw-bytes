@@ -3523,3 +3523,271 @@ def stack_step(stack, x, states=None):
 
     return x, new_states
 
+# Step 34 - stage_step
+def stage_step(stage, x, state=None, counts=None, boundary=None):
+    """
+    Advance one HNetStage by exactly one position.
+
+    Batch size must be 1.
+
+    Args:
+        stage (HNetStage): Current hierarchical stage.
+        x (torch.Tensor): Input of shape (1, 1, D).
+        state (dict, optional): Streaming state containing:
+            encoder: Encoder stack state.
+            decoder: Decoder stack state.
+            prev: Previous encoder output.
+            inner: Recursive inner-stage state.
+            zbar: Last smoothed chunk representation.
+
+        counts (dict, optional): Counts main-network executions.
+        boundary (bool, optional): External boundary decision.
+            None means use the learned router.
+
+    Returns:
+        tuple:
+            out: Output tensor of shape (1, 1, D).
+            new_state: Updated streaming state dictionary.
+    """
+
+    # --------------------------------------------------
+    # 1. Validate input
+    # --------------------------------------------------
+
+    if x.ndim != 3 or x.shape[0] != 1 or x.shape[1] != 1:
+        raise ValueError("x must have shape (1, 1, D).")
+
+    # Remember the original input dimension.
+    D = x.shape[-1]
+
+    if D > stage.d:
+        raise ValueError("Input dimension cannot exceed stage width.")
+
+    # --------------------------------------------------
+    # 2. Initialize streaming state
+    # --------------------------------------------------
+
+    if state is None:
+        state = {}
+
+    if not isinstance(state, dict):
+        raise TypeError("state must be a dictionary or None.")
+
+    encoder_state = state.get("encoder")
+    decoder_state = state.get("decoder")
+    prev = state.get("prev")
+    inner_state = state.get("inner")
+    zbar = state.get("zbar")
+
+    # --------------------------------------------------
+    # 3. Optional dimension padding
+    # --------------------------------------------------
+
+    if stage.pad is not None:
+
+        pad = stage.pad.view(1, 1, -1)
+
+        x = torch.cat([x, pad], dim=-1)
+
+    # --------------------------------------------------
+    # 4. Innermost stage
+    # --------------------------------------------------
+
+    if stage.inner:
+
+        # Count every execution of the main network.
+        if counts is not None:
+            counts["main"] = counts.get("main", 0) + 1
+
+        # Process one position through the main stack.
+        out, main_state = stack_step(
+            stage.main,
+            x,
+            states=state.get("main")
+        )
+
+        # Restore the original input feature dimension.
+        out = out[..., :D]
+
+        new_state = {
+            "main": main_state
+        }
+
+        return out, new_state
+
+    # --------------------------------------------------
+    # 5. Run the encoder
+    # --------------------------------------------------
+
+    xhat, encoder_state = stack_step(
+        stage.encoder,
+        x,
+        states=encoder_state
+    )
+
+    # Compute the residual projection.
+    r = stage.res(xhat)
+
+    # --------------------------------------------------
+    # 6. Determine the current boundary
+    # --------------------------------------------------
+
+    learned_router = boundary is None
+
+    if not learned_router:
+
+        # External boundary supplied by a predefined chunker.
+        if isinstance(boundary, torch.Tensor):
+
+            if boundary.numel() != 1:
+                raise ValueError(
+                    "boundary tensor must contain exactly one value."
+                )
+
+            b = boundary.to(
+                device=xhat.device,
+                dtype=torch.bool
+            ).reshape(1, 1)
+
+            if not boundary.dtype == torch.bool:
+                raise TypeError(
+                    "External boundary tensor must be boolean."
+                )
+
+        else:
+
+            # Python boolean boundary.
+            b = torch.full(
+                (1, 1),
+                bool(boundary),
+                dtype=torch.bool,
+                device=xhat.device
+            )
+
+        # External boundaries use probability 1 or 0.
+        p = b.to(dtype=xhat.dtype)
+
+    else:
+
+        # The first position is always a learned boundary.
+        if prev is None:
+
+            p = xhat.new_ones((1, 1))
+            b = torch.ones(
+                (1, 1),
+                dtype=torch.bool,
+                device=xhat.device
+            )
+
+        else:
+
+            # Compare the previous encoder output with the current one.
+            router_input = torch.cat(
+                [prev, xhat],
+                dim=1
+            )
+
+            # Obtain the probability associated with the current position.
+            router_probs, _ = stage.router(router_input)
+
+            p = router_probs[:, 1:2]
+
+            # Make the hard boundary decision.
+            b = p >= 0.5
+
+    # --------------------------------------------------
+    # 7. Initialize the smoothed representation if necessary
+    # --------------------------------------------------
+
+    if zbar is None:
+        zbar = xhat.new_zeros(xhat.shape)
+
+    # --------------------------------------------------
+    # 8. Execute the recursive inner stage at boundaries
+    # --------------------------------------------------
+
+    if b.item():
+
+        # Run the inner stage only when a boundary is detected.
+        zhat, inner_state = stage_step(
+            stage.sub,
+            xhat,
+            state=inner_state,
+            counts=counts,
+            boundary=None
+        )
+
+        # Update the smoothed representation.
+        if learned_router and not stage.no_smoothing:
+
+            # Exponential moving average over chunks.
+            zbar = (
+                p.unsqueeze(-1) * zhat
+                + (1.0 - p).unsqueeze(-1) * zbar
+            )
+
+        else:
+
+            # No smoothing for external chunkers or ablations.
+            zbar = zhat
+
+    # If no boundary is detected, retain the previous zbar.
+
+    # --------------------------------------------------
+    # 9. Reconstruct the current position
+    # --------------------------------------------------
+
+    zt = zbar
+
+    # Apply confidence only when using the learned router.
+    if learned_router:
+
+        if stage.no_ste:
+
+            # Raw confidence without straight-through estimation.
+            confidence = torch.where(
+                b,
+                p,
+                1.0 - p
+            )
+
+        else:
+
+            # Straight-through confidence.
+            confidence = straight_through_confidence(
+                p,
+                b
+            )
+
+        # Apply the confidence multiplier.
+        zt = zt * confidence.unsqueeze(-1)
+
+    # --------------------------------------------------
+    # 10. Decoder and residual connection
+    # --------------------------------------------------
+
+    combined = zt + r
+
+    out, decoder_state = stack_step(
+        stage.decoder,
+        combined,
+        states=decoder_state
+    )
+
+    # Restore the original input feature dimension.
+    out = out[..., :D]
+
+    # --------------------------------------------------
+    # 11. Construct the updated streaming state
+    # --------------------------------------------------
+
+    new_state = {
+        "encoder": encoder_state,
+        "decoder": decoder_state,
+        "prev": xhat,
+        "inner": inner_state,
+        "zbar": zbar
+    }
+
+    return out, new_state
+

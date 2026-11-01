@@ -43,6 +43,7 @@ python scaffold.py
 - [x] **31.** mamba_step
 - [x] **32.** transformer_step
 - [x] **33.** stack_step
+- [x] **34.** stage_step
 
 ---
 
