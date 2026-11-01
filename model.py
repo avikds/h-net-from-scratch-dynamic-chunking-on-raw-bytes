@@ -299,3 +299,81 @@ class RoutingModule(torch.nn.Module):
 
         return p, b
 
+# Step 7 - compact_chunks
+def compact_chunks(x, b):
+    """
+    Keep boundary vectors and compact each batch row to the left.
+
+    Args:
+        x (torch.Tensor):
+            Input tensor of shape (B, L) or (B, L, d).
+
+        b (torch.Tensor):
+            Boolean boundary tensor of shape (B, L).
+
+    Returns:
+        tuple:
+            x_next: Compacted tensor of shape (B, M) or (B, M, d).
+            mask_next: Boolean tensor of shape (B, M).
+                       True indicates a valid compacted entry.
+    """
+
+    # Validate input dimensions.
+    if x.ndim not in (2, 3):
+        raise ValueError("x must have shape (B, L) or (B, L, d).")
+
+    if b.ndim != 2 or b.shape != x.shape[:2]:
+        raise ValueError("b must have shape (B, L).")
+
+    if b.dtype != torch.bool:
+        raise TypeError("b must be a boolean tensor.")
+
+    if b.device != x.device:
+        raise ValueError("x and b must be on the same device.")
+
+    B, L = b.shape
+
+    # Count the number of boundary vectors in each batch row.
+    counts = b.sum(dim=1)
+
+    # M is the maximum number of boundaries in any row.
+    M = int(counts.max().item()) if counts.numel() > 0 else 0
+
+    # Assign unique sorting keys to every position.
+    # Boundary positions receive smaller keys than non-boundary positions.
+    positions = torch.arange(L, device=x.device).unsqueeze(0)
+
+    keys = positions + (~b).long() * L
+
+    # Sort positions independently for every batch row.
+    # Since all keys are unique, sorting does not depend on tie order.
+    order = torch.argsort(keys, dim=1)
+
+    # Select the first M positions after sorting.
+    selected = order[:, :M]
+
+    # Gather the original values using the sorted indices.
+    if x.ndim == 2:
+        x_next = torch.gather(x, dim=1, index=selected)
+
+    else:
+        # Expand indices across the feature dimension.
+        d = x.shape[2]
+
+        expanded_indices = selected.unsqueeze(-1).expand(-1, -1, d)
+
+        x_next = torch.gather(
+            x,
+            dim=1,
+            index=expanded_indices
+        )
+
+    # Create a mask identifying valid entries in each compacted row.
+    # Positions beyond the original boundary count are marked False.
+    mask_next = (
+        torch.arange(M, device=x.device).unsqueeze(0)
+        < counts.unsqueeze(1)
+    )
+
+    return x_next, mask_next
+

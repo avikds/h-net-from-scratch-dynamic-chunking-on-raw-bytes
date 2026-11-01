@@ -16,6 +16,7 @@ python scaffold.py
 - [x] **4.** pool_boundaries
 - [x] **5.** space_boundaries
 - [x] **6.** RoutingModule
+- [x] **7.** compact_chunks
 
 ---
 
