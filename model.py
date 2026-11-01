@@ -220,3 +220,82 @@ def space_boundaries(ids):
 
     return boundaries
 
+# Step 6 - RoutingModule
+class RoutingModule(torch.nn.Module):
+    """
+    Predict chunk boundaries using cosine similarity
+    between adjacent projected hidden-state vectors.
+    """
+
+    def __init__(self, d):
+        super().__init__()
+
+        # Bias-free query and key projections.
+        self.q_proj = torch.nn.Linear(d, d, bias=False)
+        self.k_proj = torch.nn.Linear(d, d, bias=False)
+
+        # Initialize both projection matrices to the identity.
+        # This follows the initialization used in the paper's
+        # released implementation.
+        with torch.no_grad():
+            self.q_proj.weight.copy_(torch.eye(d))
+            self.k_proj.weight.copy_(torch.eye(d))
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x (torch.Tensor): Input of shape (B, L, d).
+            mask (torch.Tensor, optional): Boolean mask of shape (B, L).
+
+        Returns:
+            p (torch.Tensor): Boundary probabilities of shape (B, L).
+            b (torch.Tensor): Boolean boundary decisions of shape (B, L).
+        """
+
+        B, L, d = x.shape
+
+        if L == 0:
+            raise ValueError("Sequence length must be greater than zero.")
+
+        # Project input vectors into query and key representations.
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+
+        # The first position is always a chunk boundary.
+        first_prob = x.new_ones((B, 1))
+
+        if L > 1:
+            # Compare each query vector with the preceding key vector.
+            cosine_sim = F.cosine_similarity(
+                q[:, 1:, :],
+                k[:, :-1, :],
+                dim=-1
+            )
+
+            # Convert cosine similarity into boundary probabilities.
+            remaining_prob = 0.5 * (1.0 - cosine_sim)
+
+            # Combine the first-position probability with the rest.
+            p = torch.cat(
+                [first_prob, remaining_prob],
+                dim=1
+            )
+        else:
+            p = first_prob
+
+        # Keep all probabilities within the interval [0, 1].
+        p = p.clamp(0.0, 1.0)
+
+        # Convert probabilities into binary boundary decisions.
+        b = p >= 0.5
+
+        # Apply the optional mask to boundary decisions.
+        # Masked positions must never become boundaries.
+        if mask is not None:
+            if mask.shape != (B, L):
+                raise ValueError("mask must have shape (B, L).")
+
+            b = b & mask.to(device=x.device, dtype=torch.bool)
+
+        return p, b
+
