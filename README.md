@@ -30,6 +30,7 @@ python scaffold.py
 - [x] **18.** HNetStage
 - [x] **19.** HNetLM
 - [x] **20.** lr_multipliers
+- [x] **21.** stage_param_groups
 
 ---
 

@@ -1874,3 +1874,105 @@ def lr_multipliers(Ns, Ds, n_gpt=4.6):
 
     return multipliers
 
+# Step 21 - stage_param_groups
+def stage_param_groups(model, base_lr, weight_decay, mults):
+    """
+    Assign every HNetLM parameter to its corresponding hierarchical stage.
+
+    Args:
+        model: HNetLM model.
+        base_lr (float): Base learning rate.
+        weight_decay (float): Weight decay coefficient.
+        mults (list): Stage-wise learning-rate multipliers.
+
+    Returns:
+        list: One optimizer parameter-group dictionary per stage.
+    """
+
+    # Collect all recursive H-Net stages, starting from stage 0.
+    stages = []
+    current = model.stage
+
+    while current is not None:
+        stages.append(current)
+        current = getattr(current, "sub", None)
+
+    # There must be exactly one multiplier per stage.
+    if len(mults) != len(stages):
+        raise ValueError(
+            "The number of learning-rate multipliers must "
+            "match the number of H-Net stages."
+        )
+
+    # Track parameter identities to prevent duplicate assignment.
+    assigned = set()
+
+    def collect_params(module, params):
+        """Collect parameters from a module without duplicates."""
+        for param in module.parameters():
+            param_id = id(param)
+
+            if param_id not in assigned:
+                assigned.add(param_id)
+                params.append(param)
+
+    groups = []
+
+    # --------------------------------------------------
+    # Assign parameters stage by stage.
+    # --------------------------------------------------
+
+    for s, stage in enumerate(stages):
+
+        stage_params = []
+
+        # Stage 0 additionally owns the byte embedding and
+        # the final byte-prediction head.
+        if s == 0:
+            collect_params(model.embed, stage_params)
+            collect_params(model.head, stage_params)
+
+        # Collect parameters registered directly on this stage.
+        # This includes its optional padding parameter.
+        for param in stage.parameters(recurse=False):
+            param_id = id(param)
+
+            if param_id not in assigned:
+                assigned.add(param_id)
+                stage_params.append(param)
+
+        # Collect parameters from this stage's own modules.
+        # Exclude 'sub', since it belongs to the next stage.
+        for name, child in stage.named_children():
+
+            if name == "sub":
+                continue
+
+            collect_params(child, stage_params)
+
+        # Create the optimizer parameter group.
+        lr_mult = float(mults[s])
+
+        groups.append({
+            "params": stage_params,
+            "lr": base_lr * lr_mult,
+            "lr_mult": lr_mult,
+            "weight_decay": weight_decay
+        })
+
+    # --------------------------------------------------
+    # Verify that every model parameter was assigned once.
+    # --------------------------------------------------
+
+    model_param_ids = {
+        id(param) for param in model.parameters()
+    }
+
+    if assigned != model_param_ids:
+        raise RuntimeError(
+            "Parameter grouping failed: some model parameters "
+            "were missed or incorrectly assigned."
+        )
+
+    return groups
+
