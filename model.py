@@ -1319,3 +1319,78 @@ class TransformerLayer(nn.Module):
         # Project back to dimension d and add residual.
         return x + self.fc2(mlp_out)
 
+# Step 17 - build_stack
+import re
+
+
+def build_stack(layout, d, d_state=16, head_dim=16, chunk=64, heads=4):
+    """
+    Convert a layout string into an ordered neural network stack.
+
+    Layout syntax:
+        m<count> : MambaLayer
+        T<count> : TransformerLayer
+
+    Args:
+        layout (str): Architecture description, e.g. "m1T2".
+        d (int): Hidden dimension.
+        d_state (int): Mamba state dimension.
+        head_dim (int): Mamba head dimension.
+        chunk (int): Mamba SSD chunk size.
+        heads (int): Number of Transformer attention heads.
+
+    Returns:
+        nn.Sequential: Ordered layers followed by a final RMSNorm.
+    """
+
+    # Validate the layout string.
+    if not isinstance(layout, str):
+        raise TypeError("layout must be a string.")
+
+    # Require one or more valid letter-count groups.
+    if not re.fullmatch(r"(?:m\d+|T\d+)+", layout):
+        raise ValueError(
+            "Invalid layout. Expected groups such as 'm2', 'T3', or 'm1T2'."
+        )
+
+    layers = []
+
+    # Extract each layer type and its repetition count.
+    groups = re.findall(r"(m|T)(\d+)", layout)
+
+    # Construct layers in the order specified by the layout.
+    for layer_type, count_str in groups:
+
+        count = int(count_str)
+
+        if count <= 0:
+            raise ValueError("Layer counts must be positive integers.")
+
+        for _ in range(count):
+
+            if layer_type == "m":
+                # Create a Mamba-2 layer.
+                layers.append(
+                    MambaLayer(
+                        d,
+                        d_state=d_state,
+                        head_dim=head_dim,
+                        chunk=chunk
+                    )
+                )
+
+            elif layer_type == "T":
+                # Create a Transformer layer.
+                layers.append(
+                    TransformerLayer(
+                        d,
+                        heads=heads
+                    )
+                )
+
+    # Append exactly one final RMSNorm layer.
+    layers.append(RMSNorm(d))
+
+    # Return the complete sequential stack.
+    return nn.Sequential(*layers)
+

@@ -26,6 +26,7 @@ python scaffold.py
 - [x] **14.** MambaLayer
 - [x] **15.** apply_rope
 - [x] **16.** TransformerLayer
+- [x] **17.** build_stack
 
 ---
 
