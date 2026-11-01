@@ -1976,3 +1976,77 @@ def stage_param_groups(model, base_lr, weight_decay, mults):
 
     return groups
 
+# Step 22 - wsd_factor
+def wsd_factor(step, total, warmup=0.1, decay=0.2, floor=0.1):
+    """
+    Calculate the learning-rate multiplier using a
+    Warmup-Stable-Decay (WSD) schedule.
+
+    Args:
+        step (int): Current training step.
+        total (int): Total number of training steps.
+        warmup (float): Fraction of training allocated to warmup.
+        decay (float): Fraction of training allocated to decay.
+        floor (float): Minimum learning-rate multiplier.
+
+    Returns:
+        float: Learning-rate multiplier for the current step.
+    """
+
+    # Validate schedule parameters.
+    if total <= 0:
+        raise ValueError("total must be positive.")
+
+    if step < 0:
+        raise ValueError("step must be non-negative.")
+
+    if not (0.0 <= warmup <= 1.0):
+        raise ValueError("warmup must be between 0 and 1.")
+
+    if not (0.0 <= decay <= 1.0):
+        raise ValueError("decay must be between 0 and 1.")
+
+    if warmup + decay > 1.0:
+        raise ValueError("warmup + decay must not exceed 1.")
+
+    if not (0.0 < floor <= 1.0):
+        raise ValueError("floor must be greater than 0 and at most 1.")
+
+    # Calculate warmup and decay durations.
+    w = warmup * total
+    d = decay * total
+
+    # --------------------------------------------------
+    # 1. Linear warmup phase
+    # --------------------------------------------------
+
+    if step < w:
+        return float((step + 1) / w)
+
+    # --------------------------------------------------
+    # 2. Stable phase
+    # --------------------------------------------------
+
+    if step < total - d:
+        return 1.0
+
+    # If decay is disabled, retain the full learning rate.
+    if d == 0:
+        return 1.0
+
+    # --------------------------------------------------
+    # 3. Inverse-square-root decay phase
+    # --------------------------------------------------
+
+    tau = (step - (total - d)) / d
+
+    # Keep the decay progress within the interval [0, 1].
+    tau = max(0.0, min(1.0, tau))
+
+    # Calculate the inverse-square-root decay factor.
+    factor = 1.0 / math.sqrt(
+        1.0 + (1.0 / (floor ** 2) - 1.0) * tau
+    )
+
+    return float(factor)
+
