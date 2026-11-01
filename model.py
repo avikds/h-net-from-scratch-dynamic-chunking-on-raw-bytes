@@ -7,11 +7,17 @@ Assembled from your step-by-step solutions.
 import numpy as np
 
 # Step 1 - load_corpus
+import numpy as np
 import os
 import tempfile
 import urllib.request
+import math
+import re
+import time
+import statistics
 import torch
-
+import torch.nn as nn
+import torch.nn.functional as F
 
 def load_corpus(n_bytes=None):
     """
