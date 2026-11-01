@@ -105,3 +105,43 @@ def sample_batch(data, batch_size, seq_len, generator):
 
     return x, y
 
+# Step 3 - bits_per_byte
+import math
+import torch.nn.functional as F
+
+
+def bits_per_byte(logits, targets):
+    """
+    Calculate bits per byte (BPB) from next-byte prediction logits.
+
+    Args:
+        logits (torch.Tensor): Predicted logits of shape (B, L, 256).
+        targets (torch.Tensor): Target byte values of shape (B, L).
+
+    Returns:
+        float: Mean cross-entropy loss converted from nats to bits.
+    """
+
+    # Extract dimensions and validate the input shapes.
+    if logits.ndim != 3 or logits.shape[-1] != 256:
+        raise ValueError("logits must have shape (B, L, 256).")
+
+    if targets.shape != logits.shape[:2]:
+        raise ValueError("targets must have shape (B, L).")
+
+    # Flatten batch and sequence dimensions for cross-entropy.
+    logits_flat = logits.reshape(-1, 256)
+    targets_flat = targets.reshape(-1).long()
+
+    # Calculate mean cross-entropy loss in nats.
+    loss = F.cross_entropy(
+        logits_flat,
+        targets_flat,
+        reduction="mean"
+    )
+
+    # Convert nats into bits and return a Python float.
+    bpb = loss / math.log(2.0)
+
+    return bpb.item()
+
