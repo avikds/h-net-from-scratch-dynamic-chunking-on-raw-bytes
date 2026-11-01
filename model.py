@@ -2819,3 +2819,91 @@ class IndependentRouter(nn.Module):
 
         return p, b
 
+# Step 28 - arm_config
+def arm_config(name, N=6):
+    """
+    Return the configuration for a specified experiment arm.
+
+    Returns a dictionary containing:
+        layout, widths, targets, cfg, chunker
+    """
+
+    if N <= 1:
+        raise ValueError("N must be greater than 1.")
+
+    # Shared architecture for single-stage hierarchical arms.
+    hierarchical_layout = ["m2", ["T3"], "m2"]
+    hierarchical_widths = [32, 96]
+
+    if name == "dynamic":
+        layout = hierarchical_layout
+        widths = hierarchical_widths
+        targets = [N]
+        cfg = {}
+        chunker = None
+
+    elif name == "no_smoothing":
+        layout = hierarchical_layout
+        widths = hierarchical_widths
+        targets = [N]
+        cfg = {"no_smoothing": True}
+        chunker = None
+
+    elif name == "no_ste":
+        layout = hierarchical_layout
+        widths = hierarchical_widths
+        targets = [N]
+        cfg = {"no_ste": True}
+        chunker = None
+
+    elif name == "no_cosine":
+        layout = hierarchical_layout
+        widths = hierarchical_widths
+        targets = [N]
+        cfg = {"router_cls": IndependentRouter}
+        chunker = None
+
+    elif name == "space":
+        layout = hierarchical_layout
+        widths = hierarchical_widths
+        targets = [6]
+        cfg = {}
+        chunker = space_boundaries
+
+    elif name == "pool":
+        layout = hierarchical_layout
+        widths = hierarchical_widths
+        targets = [5]
+        cfg = {}
+        chunker = lambda ids: pool_boundaries(ids, 5)
+
+    elif name == "byte":
+        layout = ["m5"]
+        widths = [48]
+        targets = []
+        cfg = {}
+        chunker = None
+
+    elif name == "two_stage":
+        # Correct two-stage hierarchical architecture.
+        layout = [
+            "m2",
+            ["m2", ["T3"], "m2"],
+            "m2"
+        ]
+        widths = [32, 32, 96]
+        targets = [2, 3]
+        cfg = {}
+        chunker = None
+
+    else:
+        raise ValueError(f"Unknown experiment arm: {name!r}")
+
+    return {
+        "layout": layout,
+        "widths": widths,
+        "targets": targets,
+        "cfg": cfg,
+        "chunker": chunker
+    }
+

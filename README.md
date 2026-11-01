@@ -37,6 +37,7 @@ python scaffold.py
 - [x] **25.** evaluate_bpb
 - [x] **26.** train_hnet
 - [x] **27.** IndependentRouter
+- [x] **28.** arm_config
 
 ---
 
