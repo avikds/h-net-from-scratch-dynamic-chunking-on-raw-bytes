@@ -3791,3 +3791,153 @@ def stage_step(stage, x, state=None, counts=None, boundary=None):
 
     return out, new_state
 
+# Step 35 - stream_bytes
+def stream_bytes(model, ids, boundaries=None):
+    """
+    Run an HNetLM one byte at a time.
+
+    Args:
+        model (HNetLM): Trained byte-level H-Net model.
+        ids (torch.Tensor): Long tensor of shape (1, L).
+        boundaries (torch.Tensor, optional):
+            Boolean tensor of shape (1, L), containing externally
+            specified chunk boundaries.
+
+    Returns:
+        tuple:
+            logits: Tensor of shape (1, L, 256).
+            main_ran: List containing 1 if the innermost main
+                      network ran at that position, otherwise 0.
+    """
+
+    # --------------------------------------------------
+    # 1. Validate inputs
+    # --------------------------------------------------
+
+    if ids.ndim != 2 or ids.shape[0] != 1:
+        raise ValueError("ids must have shape (1, L).")
+
+    if ids.dtype != torch.long:
+        raise TypeError("ids must have dtype torch.long.")
+
+    if boundaries is not None:
+        if boundaries.shape != ids.shape:
+            raise ValueError(
+                "boundaries must have the same shape as ids."
+            )
+
+        if boundaries.dtype != torch.bool:
+            raise TypeError(
+                "boundaries must be a boolean tensor."
+            )
+
+        if boundaries.device != ids.device:
+            raise ValueError(
+                "boundaries and ids must be on the same device."
+            )
+
+    # Determine the input sequence length.
+    L = ids.shape[1]
+
+    # Obtain the model's device.
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = ids.device
+
+    ids = ids.to(device)
+
+    if boundaries is not None:
+        boundaries = boundaries.to(device)
+
+    # --------------------------------------------------
+    # 2. Initialize streaming state and counters
+    # --------------------------------------------------
+
+    state = None
+
+    # Track the number of executions of the innermost network.
+    counts = {"main": 0}
+
+    # Store logits and main-network execution indicators.
+    logits_list = []
+    main_ran = []
+
+    # --------------------------------------------------
+    # 3. Switch to evaluation mode
+    # --------------------------------------------------
+
+    model.eval()
+
+    try:
+        with torch.no_grad():
+
+            # Process the sequence one byte at a time.
+            for t in range(L):
+
+                # --------------------------------------
+                # A. Extract the current byte
+                # --------------------------------------
+
+                current_id = ids[:, t:t + 1]
+
+                # --------------------------------------
+                # B. Embed the current byte
+                # --------------------------------------
+
+                x = model.embed(current_id)
+
+                # --------------------------------------
+                # C. Determine the external boundary
+                # --------------------------------------
+
+                if boundaries is None:
+                    current_boundary = None
+                else:
+                    current_boundary = boundaries[:, t:t + 1]
+
+                # --------------------------------------
+                # D. Advance the recursive H-Net stage
+                # --------------------------------------
+
+                previous_count = counts["main"]
+
+                x, state = stage_step(
+                    model.stage,
+                    x,
+                    state=state,
+                    counts=counts,
+                    boundary=current_boundary
+                )
+
+                # --------------------------------------
+                # E. Apply the byte prediction head
+                # --------------------------------------
+
+                current_logits = model.head(x)
+
+                logits_list.append(current_logits)
+
+                # --------------------------------------
+                # F. Record main-network execution
+                # --------------------------------------
+
+                ran = counts["main"] - previous_count
+
+                main_ran.append(int(ran > 0))
+
+    finally:
+        # Restore training mode as required.
+        model.train()
+
+    # --------------------------------------------------
+    # 4. Concatenate predictions across byte positions
+    # --------------------------------------------------
+
+    if L > 0:
+        logits = torch.cat(logits_list, dim=1)
+    else:
+        logits = model.head.weight.new_empty((1, 0, 256))
+
+    return logits, main_ran
+

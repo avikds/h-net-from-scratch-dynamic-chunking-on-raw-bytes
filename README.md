@@ -44,6 +44,7 @@ python scaffold.py
 - [x] **32.** transformer_step
 - [x] **33.** stack_step
 - [x] **34.** stage_step
+- [x] **35.** stream_bytes
 
 ---
 
