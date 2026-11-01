@@ -65,3 +65,43 @@ def load_corpus(n_bytes=None):
     # Convert byte values into a 1-D tensor of type torch.long.
     return torch.tensor(list(raw_bytes), dtype=torch.long)
 
+# Step 2 - sample_batch
+def sample_batch(data, batch_size, seq_len, generator):
+    """
+    Sample random windows for next-byte prediction.
+
+    Args:
+        data (torch.Tensor): 1-D tensor containing raw byte values.
+        batch_size (int): Number of sequences to sample.
+        seq_len (int): Length of each input sequence.
+        generator (torch.Generator): Random number generator.
+
+    Returns:
+        tuple: (x, y), two tensors of shape (batch_size, seq_len).
+               x contains input sequences.
+               y contains the corresponding next-byte targets.
+    """
+
+    # Draw random starting positions using the supplied generator.
+    starts = torch.randint(
+        0,
+        len(data) - seq_len - 1,
+        (batch_size,),
+        generator=generator
+    )
+
+    # Generate offsets for each position within a sequence.
+    offsets = torch.arange(seq_len, device=data.device)
+
+    # Extract input sequences.
+    x = data[starts[:, None] + offsets]
+
+    # Extract targets shifted forward by one byte.
+    y = data[starts[:, None] + offsets + 1]
+
+    # Ensure both outputs have dtype torch.long.
+    x = x.long()
+    y = y.long()
+
+    return x, y
+

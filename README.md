@@ -11,6 +11,7 @@ python scaffold.py
 ## Steps
 
 - [x] **1.** load_corpus
+- [x] **2.** sample_batch
 
 ---
 
