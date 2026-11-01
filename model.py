@@ -1699,3 +1699,117 @@ class HNetStage(nn.Module):
 
         return output
 
+# Step 19 - HNetLM
+class HNetLM(nn.Module):
+    """
+    Complete byte-level hierarchical language model.
+
+    Architecture:
+        Byte Embedding -> Recursive H-Net Stage -> Output Head
+
+    The model predicts one of 256 possible byte values
+    at every sequence position.
+    """
+
+    def __init__(self, layout, widths, targets, cfg=None):
+        super().__init__()
+
+        # Store the model architecture configuration.
+        self.layout = layout
+        self.widths = widths
+        self.targets = targets
+
+        # --------------------------------------------------
+        # 1. Byte embedding
+        # --------------------------------------------------
+
+        # The vocabulary contains all 256 possible byte values.
+        self.embed = nn.Embedding(
+            num_embeddings=256,
+            embedding_dim=widths[0]
+        )
+
+        # --------------------------------------------------
+        # 2. Hierarchical H-Net stage
+        # --------------------------------------------------
+
+        # Construct the recursive H-Net architecture.
+        self.stage = HNetStage(
+            layout,
+            widths,
+            targets,
+            cfg
+        )
+
+        # --------------------------------------------------
+        # 3. Output projection
+        # --------------------------------------------------
+
+        # Project hidden representations into 256 byte logits.
+        # Bias is disabled as required.
+        self.head = nn.Linear(
+            widths[0],
+            256,
+            bias=False
+        )
+
+    def forward(self, ids, boundaries=None):
+        """
+        Forward pass of the byte-level language model.
+
+        Args:
+            ids (torch.Tensor):
+                Long tensor of shape (B, L) containing byte IDs.
+
+            boundaries (torch.Tensor, optional):
+                Optional predefined boolean chunk boundaries
+                of shape (B, L).
+
+        Returns:
+            tuple:
+                logits: Tensor of shape (B, L, 256).
+                stats: List containing router statistics from
+                       the hierarchical stages.
+        """
+
+        if ids.ndim != 2:
+            raise ValueError("ids must have shape (B, L).")
+
+        # --------------------------------------------------
+        # 1. Create an all-True sequence validity mask
+        # --------------------------------------------------
+
+        mask = torch.ones(
+            ids.shape,
+            dtype=torch.bool,
+            device=ids.device
+        )
+
+        # --------------------------------------------------
+        # 2. Embed the raw byte IDs
+        # --------------------------------------------------
+
+        x = self.embed(ids)
+
+        # --------------------------------------------------
+        # 3. Run the hierarchical H-Net stage
+        # --------------------------------------------------
+
+        # Create a fresh statistics list for this forward pass.
+        stats = []
+
+        x = self.stage(
+            x,
+            mask,
+            boundaries=boundaries,
+            stats=stats
+        )
+
+        # --------------------------------------------------
+        # 4. Predict byte-level logits
+        # --------------------------------------------------
+
+        logits = self.head(x)
+
+        return logits, stats
+
