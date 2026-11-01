@@ -592,3 +592,38 @@ def ratio_loss(p, b, N, mask=None):
 
     return loss
 
+# Step 12 - RMSNorm
+class RMSNorm(nn.Module):
+    """
+    Root Mean Square Normalization with a learnable scale parameter.
+    """
+
+    def __init__(self, d, eps=1e-5):
+        super().__init__()
+
+        # Learnable scaling parameter, initialized to ones.
+        self.weight = nn.Parameter(torch.ones(d))
+
+        # Small constant for numerical stability.
+        self.eps = eps
+
+    def forward(self, x):
+        """
+        Apply RMS normalization along the last dimension.
+
+        Args:
+            x (torch.Tensor): Input tensor whose last dimension is d.
+
+        Returns:
+            torch.Tensor: RMS-normalized tensor with the same shape as x.
+        """
+
+        # Calculate the mean squared value along the last dimension.
+        mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+
+        # Calculate the inverse root mean square.
+        inv_rms = torch.rsqrt(mean_square + self.eps)
+
+        # Normalize the input and apply the learnable scale.
+        return x * inv_rms * self.weight
+

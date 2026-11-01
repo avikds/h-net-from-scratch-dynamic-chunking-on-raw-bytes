@@ -21,6 +21,7 @@ python scaffold.py
 - [x] **9.** causal_upsample
 - [x] **10.** straight_through_confidence
 - [x] **11.** ratio_loss
+- [x] **12.** RMSNorm
 
 ---
 
