@@ -3450,3 +3450,76 @@ def transformer_step(layer, x, cache=None):
 
     return out, new_cache
 
+# Step 33 - stack_step
+def stack_step(stack, x, states=None):
+    """
+    Advance an entire nn.Sequential stack by one position.
+
+    Args:
+        stack (nn.Sequential):
+            Stack containing MambaLayer, TransformerLayer,
+            and stateless layers such as RMSNorm.
+
+        x (torch.Tensor):
+            Input tensor of shape (B, 1, d).
+
+        states (list, optional):
+            One state entry per layer. Stateful layers contain their
+            respective streaming states; stateless layers use None.
+
+    Returns:
+        tuple:
+            x: Output tensor after processing all layers.
+            new_states: Updated state list, one entry per layer.
+    """
+
+    # Initialize one empty state entry per layer.
+    if states is None:
+        states = [None] * len(stack)
+
+    # Validate the supplied state list.
+    if len(states) != len(stack):
+        raise ValueError(
+            "states must contain exactly one entry per stack layer."
+        )
+
+    # Validate the input sequence position.
+    if x.ndim != 3 or x.shape[1] != 1:
+        raise ValueError("x must have shape (B, 1, d).")
+
+    new_states = []
+
+    # Process each layer in its original sequential order.
+    for layer, layer_state in zip(stack, states):
+
+        if isinstance(layer, MambaLayer):
+
+            # Advance the Mamba layer and update its SSM/conv state.
+            x, new_state = mamba_step(
+                layer,
+                x,
+                state=layer_state
+            )
+
+        elif isinstance(layer, TransformerLayer):
+
+            # Advance the Transformer layer and update its KV cache.
+            x, new_state = transformer_step(
+                layer,
+                x,
+                cache=layer_state
+            )
+
+        else:
+
+            # Stateless layers, such as RMSNorm, use their
+            # ordinary forward operation.
+            x = layer(x)
+
+            new_state = None
+
+        # Store the updated state for this layer.
+        new_states.append(new_state)
+
+    return x, new_states
+
