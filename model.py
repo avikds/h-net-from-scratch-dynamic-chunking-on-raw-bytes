@@ -2328,3 +2328,187 @@ def flops_per_byte(layout, widths, bytes_per_chunk, seq_len=128, **kw):
     # Return average forward FLOPs per input byte.
     return total_flops / seq_len
 
+# Step 25 - evaluate_bpb
+def evaluate_bpb(
+    model,
+    data,
+    chunker=None,
+    seq_len=128,
+    batch_size=32,
+    n_batches=8,
+    seed=999
+):
+    """
+    Evaluate held-out bits per byte and actual compression.
+
+    Args:
+        model: HNetLM model to evaluate.
+        data (torch.Tensor): 1-D tensor of raw byte values.
+        chunker (callable, optional): Function mapping input IDs
+            to a boolean boundary mask of shape (B, L).
+        seq_len (int): Evaluation sequence length.
+        batch_size (int): Number of sequences per batch.
+        n_batches (int): Number of evaluation batches.
+        seed (int): Seed for reproducible evaluation windows.
+
+    Returns:
+        dict:
+            bpb (float): Mean negative log-likelihood in bits per byte.
+            bytes_per_chunk (list): Actual cumulative compression
+                for each chunking stage.
+    """
+
+    # Validate evaluation parameters.
+    if data.ndim != 1:
+        raise ValueError("data must be a 1-D tensor.")
+
+    if seq_len <= 0 or batch_size <= 0 or n_batches <= 0:
+        raise ValueError(
+            "seq_len, batch_size and n_batches must be positive."
+        )
+
+    if len(data) <= seq_len + 1:
+        raise ValueError("data must be longer than seq_len + 1.")
+
+    # Obtain the model's device.
+    try:
+        device = next(model.parameters()).device
+    except StopIteration:
+        device = data.device
+
+    # Use CPU data for reproducible sampling with a CPU generator.
+    sampling_data = data.detach().to(
+        device="cpu",
+        dtype=torch.long
+    )
+
+    # All model arms receive identical evaluation windows
+    # when called with the same seed and arguments.
+    generator = torch.Generator().manual_seed(seed)
+
+    # Accumulators for evaluation loss and input bytes.
+    total_nll = 0.0
+    total_bytes = 0
+
+    # Accumulate the number of positions retained by each
+    # dynamic chunking stage across all evaluation batches.
+    kept_positions = []
+
+    # Evaluation mode disables training-specific behavior.
+    model.eval()
+
+    try:
+        with torch.no_grad():
+
+            for _ in range(n_batches):
+
+                # Draw a reproducible batch of next-byte windows.
+                x, y = sample_batch(
+                    sampling_data,
+                    batch_size,
+                    seq_len,
+                    generator
+                )
+
+                # Move evaluation data to the model's device.
+                x = x.to(device)
+                y = y.to(device)
+
+                # Optionally generate predefined chunk boundaries.
+                boundaries = None
+
+                if chunker is not None:
+                    boundaries = chunker(x)
+
+                    if boundaries.shape != x.shape:
+                        raise ValueError(
+                            "chunker must return a boundary mask "
+                            "with the same shape as the input IDs."
+                        )
+
+                    if boundaries.dtype != torch.bool:
+                        raise TypeError(
+                            "chunker must return a boolean boundary mask."
+                        )
+
+                # Run the complete H-Net model.
+                logits, stats = model(
+                    x,
+                    boundaries=boundaries
+                )
+
+                # Validate output dimensions.
+                if logits.shape != (
+                    batch_size,
+                    seq_len,
+                    256
+                ):
+                    raise ValueError(
+                        "Model logits must have shape (B, L, 256)."
+                    )
+
+                # ------------------------------------------
+                # 1. Accumulate negative log-likelihood
+                # ------------------------------------------
+
+                batch_nll = F.cross_entropy(
+                    logits.reshape(-1, 256),
+                    y.reshape(-1),
+                    reduction="sum"
+                )
+
+                total_nll += batch_nll.item()
+
+                # Each target corresponds to one predicted byte.
+                total_bytes += y.numel()
+
+                # ------------------------------------------
+                # 2. Accumulate actual compression statistics
+                # ------------------------------------------
+
+                for stage_idx, stage_stats in enumerate(stats):
+
+                    # Initialize the accumulator for this stage.
+                    if stage_idx >= len(kept_positions):
+                        kept_positions.append(0.0)
+
+                    # Count how many positions this stage retained.
+                    kept_positions[stage_idx] += (
+                        stage_stats["b"].sum().item()
+                    )
+
+    finally:
+        # Restore training mode even if evaluation raises an error.
+        model.train()
+
+    # ----------------------------------------------
+    # 3. Convert total NLL from nats into bits per byte
+    # ----------------------------------------------
+
+    bpb = total_nll / (math.log(2.0) * total_bytes)
+
+    # ----------------------------------------------
+    # 4. Calculate cumulative bytes per kept position
+    # ----------------------------------------------
+
+    bytes_per_chunk = []
+
+    for kept in kept_positions:
+
+        if kept <= 0:
+            raise ValueError(
+                "A chunking stage retained no positions."
+            )
+
+        # Use the total original input bytes as the numerator.
+        # This produces cumulative compression relative to
+        # the original byte sequence.
+        ratio = total_bytes / kept
+
+        bytes_per_chunk.append(float(ratio))
+
+    return {
+        "bpb": float(bpb),
+        "bytes_per_chunk": bytes_per_chunk
+    }
+

@@ -34,6 +34,7 @@ python scaffold.py
 - [x] **22.** wsd_factor
 - [x] **23.** layer_flops
 - [x] **24.** flops_per_byte
+- [x] **25.** evaluate_bpb
 
 ---
 
