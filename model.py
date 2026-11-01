@@ -2196,3 +2196,135 @@ def layer_flops(
 
     return total
 
+# Step 24 - flops_per_byte
+def flops_per_byte(layout, widths, bytes_per_chunk, seq_len=128, **kw):
+    """
+    Calculate total forward FLOPs per input byte for a nested H-Net.
+
+    Each stage's sequence length is calculated relative to the
+    original input sequence length, not cumulatively.
+    """
+
+    # Validate architecture dimensions.
+    if seq_len <= 0:
+        raise ValueError("seq_len must be positive.")
+
+    if not widths:
+        raise ValueError("widths must not be empty.")
+
+    if len(widths) != len(bytes_per_chunk) + 1:
+        raise ValueError(
+            "widths must contain exactly one more element "
+            "than bytes_per_chunk."
+        )
+
+    if any(d <= 0 for d in widths):
+        raise ValueError("All stage widths must be positive.")
+
+    if any(b <= 0 for b in bytes_per_chunk):
+        raise ValueError("All compression factors must be positive.")
+
+    num_stages = len(widths) - 1
+
+    # Calculate FLOPs for a stack such as m2, T3 or m1T2.
+    def stack_flops(stack_layout, d, positions):
+
+        if not isinstance(stack_layout, str):
+            raise TypeError("Stack layout must be a string.")
+
+        if not re.fullmatch(r"(?:m\d+|T\d+)+", stack_layout):
+            raise ValueError(f"Invalid stack layout: {stack_layout!r}")
+
+        total = 0.0
+
+        for kind, count_str in re.findall(
+            r"(m|T)(\d+)", stack_layout
+        ):
+            count = int(count_str)
+
+            if count <= 0:
+                raise ValueError("Layer counts must be positive.")
+
+            total += count * layer_flops(
+                kind,
+                positions,
+                d,
+                **kw
+            )
+
+        return total
+
+    # Recursively traverse the nested H-Net architecture.
+    def traverse(node, stage):
+
+        d = widths[stage]
+
+        # IMPORTANT:
+        # Every stage's positions are measured relative to seq_len.
+        if stage == 0:
+            positions = seq_len
+        else:
+            positions = seq_len / bytes_per_chunk[stage - 1]
+
+        # Innermost main network represented as a stack string.
+        if isinstance(node, str):
+
+            if stage != num_stages:
+                raise ValueError("Unexpected main-network depth.")
+
+            return stack_flops(node, d, positions)
+
+        if not isinstance(node, (list, tuple)):
+            raise TypeError("Invalid nested layout.")
+
+        # Innermost stage: [main]
+        if len(node) == 1:
+
+            if stage != num_stages:
+                raise ValueError("Unexpected innermost stage.")
+
+            return stack_flops(node[0], d, positions)
+
+        # Non-innermost stage: [encoder, inner, decoder]
+        if len(node) != 3:
+            raise ValueError(
+                "Expected [encoder, inner, decoder] layout."
+            )
+
+        if stage >= num_stages:
+            raise ValueError("Missing compression factor.")
+
+        encoder, inner, decoder = node
+
+        # Encoder operates at the current stage's resolution.
+        encoder_cost = stack_flops(
+            encoder, d, positions
+        )
+
+        # Recursively calculate the next stage.
+        # Its sequence length will be calculated directly
+        # from the original seq_len.
+        inner_cost = traverse(
+            inner, stage + 1
+        )
+
+        # Decoder operates at the current stage's resolution.
+        decoder_cost = stack_flops(
+            decoder, d, positions
+        )
+
+        return encoder_cost + inner_cost + decoder_cost
+
+    # Calculate the total hierarchical network cost.
+    network_flops = traverse(layout, 0)
+
+    # Embedding and output-head FLOPs.
+    embed_head_flops = (
+        2 * (2 * seq_len * 256 * widths[0])
+    )
+
+    total_flops = network_flops + embed_head_flops
+
+    # Return average forward FLOPs per input byte.
+    return total_flops / seq_len
+
