@@ -14,6 +14,7 @@ python scaffold.py
 - [x] **2.** sample_batch
 - [x] **3.** bits_per_byte
 - [x] **4.** pool_boundaries
+- [x] **5.** space_boundaries
 
 ---
 

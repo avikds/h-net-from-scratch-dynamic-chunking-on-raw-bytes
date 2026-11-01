@@ -174,3 +174,49 @@ def pool_boundaries(ids, k):
     # Expand the same boundary pattern across every batch row.
     return boundaries.unsqueeze(0).expand(ids.shape[0], -1)
 
+# Step 5 - space_boundaries
+def space_boundaries(ids):
+    """
+    Identify chunk boundaries using SpaceByte's space-like rule.
+
+    Args:
+        ids (torch.Tensor): Input byte tensor of shape (B, L).
+
+    Returns:
+        torch.Tensor: Boolean boundary tensor of shape (B, L).
+    """
+
+    if ids.ndim != 2:
+        raise ValueError("ids must have shape (B, L).")
+
+    # Identify uppercase and lowercase ASCII letters.
+    is_upper = (ids >= 65) & (ids <= 90)
+    is_lower = (ids >= 97) & (ids <= 122)
+    is_letter = is_upper | is_lower
+
+    # Identify ASCII digits.
+    is_digit = (ids >= 48) & (ids <= 57)
+
+    # Identify UTF-8 continuation bytes.
+    is_continuation = (ids >= 128) & (ids <= 191)
+
+    # A byte is spacelike if it is none of the above.
+    spacelike = ~(is_letter | is_digit | is_continuation)
+
+    # Shift spacelike indicators by one position to obtain
+    # the previous byte's spacelike status.
+    prev_spacelike = torch.zeros_like(spacelike)
+
+    if ids.shape[1] > 1:
+        prev_spacelike[:, 1:] = spacelike[:, :-1]
+
+    # A boundary occurs when the current byte is spacelike
+    # and the previous byte is not spacelike.
+    boundaries = spacelike & ~prev_spacelike
+
+    # Position zero is always considered a boundary.
+    if ids.shape[1] > 0:
+        boundaries[:, 0] = True
+
+    return boundaries
+
