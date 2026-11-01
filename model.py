@@ -3086,3 +3086,212 @@ def compression_summary(trace, target, stage=0):
         "gap": float(gap)
     }
 
+# Step 31 - mamba_step
+def mamba_step(layer, x, state=None):
+    """
+    Advance a MambaLayer by exactly one sequence position.
+
+    Args:
+        layer (MambaLayer): Existing Mamba-2 layer.
+        x (torch.Tensor): Input tensor of shape (B, 1, d).
+        state (dict, optional):
+            Streaming state containing:
+                conv: (B, n, d_conv - 1)
+                h:    (B, H, head_dim, d_state)
+
+    Returns:
+        tuple:
+            out: Output tensor of shape (B, 1, d).
+            new_state: Updated dictionary containing conv and h.
+    """
+
+    # --------------------------------------------------
+    # 1. Validate input
+    # --------------------------------------------------
+
+    if x.ndim != 3 or x.shape[1] != 1:
+        raise ValueError("x must have shape (B, 1, d).")
+
+    B, _, d = x.shape
+
+    if d != layer.norm.weight.numel():
+        raise ValueError("Input dimension does not match the MambaLayer.")
+
+    # Calculate the convolution input dimension.
+    n = layer.di + 2 * layer.d_state
+
+    # --------------------------------------------------
+    # 2. Initialize or retrieve the streaming state
+    # --------------------------------------------------
+
+    if state is None:
+
+        # Initially, all previous convolution inputs are zero.
+        conv_state = x.new_zeros(
+            B,
+            n,
+            layer.d_conv - 1
+        )
+
+        # The initial SSM state is zero.
+        h0 = None
+
+    else:
+
+        if not isinstance(state, dict):
+            raise TypeError("state must be a dictionary or None.")
+
+        if "conv" not in state or "h" not in state:
+            raise ValueError("state must contain 'conv' and 'h'.")
+
+        conv_state = state["conv"]
+        h0 = state["h"]
+
+        # Validate convolution state dimensions.
+        if conv_state.shape != (
+            B,
+            n,
+            layer.d_conv - 1
+        ):
+            raise ValueError("Invalid convolution state shape.")
+
+        # Validate SSM state dimensions.
+        if h0.shape != (
+            B,
+            layer.H,
+            layer.head_dim,
+            layer.d_state
+        ):
+            raise ValueError("Invalid SSM state shape.")
+
+        if conv_state.device != x.device or h0.device != x.device:
+            raise ValueError("Streaming states must be on the input device.")
+
+    # --------------------------------------------------
+    # 3. Normalize and project the current input
+    # --------------------------------------------------
+
+    projected = layer.in_proj(layer.norm(x))
+
+    # Split into gate, convolution input and time-step parameters.
+    z, xbc, dt = torch.split(
+        projected,
+        [
+            layer.di,
+            n,
+            layer.H
+        ],
+        dim=-1
+    )
+
+    # --------------------------------------------------
+    # 4. Perform one causal depthwise convolution
+    # --------------------------------------------------
+
+    # Convert the current convolution input to (B, n, 1).
+    xbc = xbc.transpose(1, 2)
+
+    # Append the current input to the previous convolution window.
+    window = torch.cat(
+        [conv_state, xbc],
+        dim=-1
+    )
+
+    # Apply depthwise convolution.
+    # The window length equals d_conv, so this produces
+    # exactly one output position without additional padding.
+    conv_out = F.conv1d(
+        window,
+        layer.conv.weight,
+        layer.conv.bias,
+        groups=n
+    )
+
+    # Remove the singleton sequence dimension.
+    conv_out = conv_out.squeeze(-1)
+
+    # Apply SiLU activation.
+    conv_out = F.silu(conv_out)
+
+    # Split into u, B and C.
+    u, B_mat, C_mat = torch.split(
+        conv_out,
+        [
+            layer.di,
+            layer.d_state,
+            layer.d_state
+        ],
+        dim=-1
+    )
+
+    # --------------------------------------------------
+    # 5. Prepare the SSM inputs
+    # --------------------------------------------------
+
+    # Apply softplus to the time-step parameters.
+    dt = F.softplus(dt + layer.dt_bias)
+
+    # Mamba state transition parameter.
+    A = -torch.exp(layer.log_a)
+
+    # Reshape u to (B, 1, H, head_dim).
+    u = u.reshape(
+        B,
+        1,
+        layer.H,
+        layer.head_dim
+    )
+
+    # Add the sequence dimension to B and C.
+    B_mat = B_mat.unsqueeze(1)
+    C_mat = C_mat.unsqueeze(1)
+
+    # --------------------------------------------------
+    # 6. Run one-position SSD scan
+    # --------------------------------------------------
+
+    y, h_new = ssd_scan(
+        u,
+        dt,
+        A,
+        B_mat,
+        C_mat,
+        h0=h0,
+        chunk=1
+    )
+
+    # Restore the inner feature dimension.
+    y = y.reshape(B, 1, layer.di)
+
+    # --------------------------------------------------
+    # 7. Apply gating and output projection
+    # --------------------------------------------------
+
+    gated = layer.gate_norm(
+        y * F.silu(z)
+    )
+
+    out = layer.out_proj(gated)
+
+    # Add the residual connection.
+    out = x + out
+
+    # --------------------------------------------------
+    # 8. Update convolution state
+    # --------------------------------------------------
+
+    # Remove the oldest convolution input.
+    # The remaining entries form the next streaming window.
+    conv_state_new = window[..., 1:]
+
+    # --------------------------------------------------
+    # 9. Package the updated streaming state
+    # --------------------------------------------------
+
+    new_state = {
+        "conv": conv_state_new,
+        "h": h_new
+    }
+
+    return out, new_state
+
