@@ -1813,3 +1813,64 @@ class HNetLM(nn.Module):
 
         return logits, stats
 
+# Step 20 - lr_multipliers
+def lr_multipliers(Ns, Ds, n_gpt=4.6):
+    """
+    Calculate stage-wise learning-rate multipliers using Equation 11.
+
+    Args:
+        Ns (list): Compression targets of all non-innermost stages.
+        Ds (list): Widths of all stages, including the innermost stage.
+        n_gpt (float): GPT reference compression factor.
+
+    Returns:
+        list: Learning-rate multipliers, outermost stage first.
+    """
+
+    # Validate the input dimensions.
+    if len(Ds) != len(Ns) + 1:
+        raise ValueError(
+            "Ds must contain exactly one more element than Ns."
+        )
+
+    if len(Ds) == 0:
+        raise ValueError("Ds must not be empty.")
+
+    # All compression targets and dimensions must be positive.
+    if any(N <= 0 for N in Ns):
+        raise ValueError("All compression targets must be positive.")
+
+    if any(D <= 0 for D in Ds):
+        raise ValueError("All stage widths must be positive.")
+
+    if n_gpt <= 0:
+        raise ValueError("n_gpt must be positive.")
+
+    # The innermost stage has a compression target of 1.
+    stage_targets = list(Ns) + [1.0]
+
+    # Total number of stages (S + 1).
+    S = len(stage_targets) - 1
+
+    # Product of compression targets across all stages.
+    total_product = math.prod(stage_targets)
+
+    multipliers = []
+
+    # Calculate one multiplier for each stage, outermost first.
+    for s in range(S + 1):
+
+        # Product of compression targets from stage s to S.
+        suffix_product = math.prod(stage_targets[s:])
+
+        # Apply Equation 11.
+        multiplier = math.sqrt(
+            n_gpt
+            * (suffix_product / total_product)
+            * (Ds[S] / Ds[s])
+        )
+
+        multipliers.append(float(multiplier))
+
+    return multipliers
+

@@ -29,6 +29,7 @@ python scaffold.py
 - [x] **17.** build_stack
 - [x] **18.** HNetStage
 - [x] **19.** HNetLM
+- [x] **20.** lr_multipliers
 
 ---
 
