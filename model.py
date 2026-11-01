@@ -377,3 +377,55 @@ def compact_chunks(x, b):
 
     return x_next, mask_next
 
+# Step 8 - smooth_chunks
+def smooth_chunks(z, P):
+    """
+    Smooth main-network outputs across uncertain chunks using EMA.
+
+    Args:
+        z (torch.Tensor): Main-network outputs of shape (B, M, d).
+        P (torch.Tensor): Router probabilities of shape (B, M).
+
+    Returns:
+        torch.Tensor: Smoothed outputs of shape (B, M, d).
+    """
+
+    if z.ndim != 3:
+        raise ValueError("z must have shape (B, M, d).")
+
+    if P.shape != z.shape[:2]:
+        raise ValueError("P must have shape (B, M).")
+
+    # Match the device and dtype of the main-network outputs.
+    P = P.to(device=z.device, dtype=z.dtype)
+
+    B, M, d = z.shape
+
+    # Handle empty sequences.
+    if M == 0:
+        return torch.empty_like(z)
+
+    # Initialize the previous smoothed vector to zero.
+    z_prev = z.new_zeros((B, d))
+
+    smoothed_outputs = []
+
+    # Apply the EMA recurrence sequentially across chunks.
+    for t in range(M):
+        p_t = P[:, t].unsqueeze(-1)
+
+        # Equation 5: combine the current output and previous EMA.
+        z_t_bar = (
+            p_t * z[:, t, :]
+            + (1.0 - p_t) * z_prev
+        )
+
+        # Store the current smoothed output.
+        smoothed_outputs.append(z_t_bar)
+
+        # Update the previous smoothed vector.
+        z_prev = z_t_bar
+
+    # Stack all smoothed vectors along the sequence dimension.
+    return torch.stack(smoothed_outputs, dim=1)
+

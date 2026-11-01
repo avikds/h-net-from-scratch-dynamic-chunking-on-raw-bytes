@@ -17,6 +17,7 @@ python scaffold.py
 - [x] **5.** space_boundaries
 - [x] **6.** RoutingModule
 - [x] **7.** compact_chunks
+- [x] **8.** smooth_chunks
 
 ---
 
