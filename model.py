@@ -3941,3 +3941,84 @@ def stream_bytes(model, ids, boundaries=None):
 
     return logits, main_ran
 
+# Step 36 - boundary_view
+def boundary_view(ids, b, sep="|"):
+    """
+    Display byte sequences divided according to chunk boundaries.
+
+    Args:
+        ids (torch.Tensor): 1-D tensor containing raw byte values.
+        b (torch.Tensor): 1-D boolean boundary tensor.
+        sep (str): Separator between decoded chunks.
+
+    Returns:
+        str: Readable text with chunk boundaries displayed.
+    """
+
+    # Validate input dimensions.
+    if ids.ndim != 1 or b.ndim != 1:
+        raise ValueError("ids and b must both be 1-D tensors.")
+
+    if ids.numel() != b.numel():
+        raise ValueError("ids and b must have equal lengths.")
+
+    if b.dtype != torch.bool:
+        raise TypeError("b must be a boolean tensor.")
+
+    if not isinstance(sep, str):
+        raise TypeError("sep must be a string.")
+
+    # Convert tensors into CPU lists.
+    byte_values = ids.detach().cpu().tolist()
+    boundary_values = b.detach().cpu().tolist()
+
+    L = len(byte_values)
+
+    if L == 0:
+        return ""
+
+    # Find all boundary positions.
+    boundary_positions = [
+        i for i, is_boundary in enumerate(boundary_values)
+        if is_boundary
+    ]
+
+    # Position zero starts the first chunk.
+    # Any bytes before the first actual boundary form their own chunk.
+    starts = [0] + [
+        i for i in boundary_positions if i > 0
+    ]
+
+    chunks = []
+
+    # Decode each chunk independently.
+    for i, start in enumerate(starts):
+
+        if i + 1 < len(starts):
+            end = starts[i + 1]
+        else:
+            end = L
+
+        # Preserve all whitespace; do not use strip().
+        chunk_bytes = bytes(byte_values[start:end])
+
+        chunk = chunk_bytes.decode(
+            "utf-8",
+            errors="replace"
+        )
+
+        chunks.append(chunk)
+
+    # Join chunks using the requested separator.
+    result = sep.join(chunks)
+
+    # Replace newlines with spaces without removing whitespace.
+    result = (
+        result
+        .replace("\r\n", " ")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+
+    return result
+
