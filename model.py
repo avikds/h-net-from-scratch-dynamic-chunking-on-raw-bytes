@@ -3295,3 +3295,158 @@ def mamba_step(layer, x, state=None):
 
     return out, new_state
 
+# Step 32 - transformer_step
+def transformer_step(layer, x, cache=None):
+    """
+    Advance a TransformerLayer by one position using a KV cache.
+
+    Args:
+        layer (TransformerLayer): Transformer layer.
+        x (torch.Tensor): Input of shape (B, 1, d).
+        cache (dict, optional):
+            Dictionary containing:
+                k: Cached rotated keys of shape (B, heads, n, hd).
+                v: Cached values of shape (B, heads, n, hd).
+
+    Returns:
+        tuple:
+            out: Output tensor of shape (B, 1, d).
+            new_cache: Updated KV cache.
+    """
+
+    # --------------------------------------------------
+    # 1. Validate the input
+    # --------------------------------------------------
+
+    if x.ndim != 3 or x.shape[1] != 1:
+        raise ValueError("x must have shape (B, 1, d).")
+
+    B, _, d = x.shape
+
+    if d != layer.heads * layer.hd:
+        raise ValueError("Input dimension does not match the layer.")
+
+    # --------------------------------------------------
+    # 2. Retrieve or initialize the KV cache
+    # --------------------------------------------------
+
+    if cache is None:
+        k_cache = None
+        v_cache = None
+        n = 0
+
+    else:
+        if not isinstance(cache, dict):
+            raise TypeError("cache must be a dictionary or None.")
+
+        if "k" not in cache or "v" not in cache:
+            raise ValueError("cache must contain 'k' and 'v'.")
+
+        k_cache = cache["k"]
+        v_cache = cache["v"]
+
+        if k_cache.ndim != 4 or v_cache.ndim != 4:
+            raise ValueError("Cached keys and values must be 4-D tensors.")
+
+        if k_cache.shape != v_cache.shape:
+            raise ValueError("Cached keys and values must have matching shapes.")
+
+        n = k_cache.shape[2]
+
+        expected_shape = (
+            B,
+            layer.heads,
+            n,
+            layer.hd
+        )
+
+        if k_cache.shape != expected_shape:
+            raise ValueError("Invalid KV cache shape.")
+
+        if k_cache.device != x.device or v_cache.device != x.device:
+            raise ValueError("KV cache must be on the input device.")
+
+    # --------------------------------------------------
+    # 3. Normalize and calculate Q, K and V
+    # --------------------------------------------------
+
+    qkv = layer.qkv(layer.norm1(x))
+
+    q, k, v = qkv.chunk(3, dim=-1)
+
+    # Reshape to (B, heads, 1, hd).
+    q = q.reshape(B, 1, layer.heads, layer.hd).transpose(1, 2)
+    k = k.reshape(B, 1, layer.heads, layer.hd).transpose(1, 2)
+    v = v.reshape(B, 1, layer.heads, layer.hd).transpose(1, 2)
+
+    # --------------------------------------------------
+    # 4. Apply RoPE using the current position offset
+    # --------------------------------------------------
+
+    q = apply_rope(q, offset=n)
+    k = apply_rope(k, offset=n)
+
+    # Values are not rotated.
+
+    # --------------------------------------------------
+    # 5. Append new keys and values to the cache
+    # --------------------------------------------------
+
+    if k_cache is None:
+        new_k = k
+        new_v = v
+
+    else:
+        new_k = torch.cat(
+            [k_cache, k],
+            dim=2
+        )
+
+        new_v = torch.cat(
+            [v_cache, v],
+            dim=2
+        )
+
+    new_cache = {
+        "k": new_k,
+        "v": new_v
+    }
+
+    # --------------------------------------------------
+    # 6. Attend over the complete cached sequence
+    # --------------------------------------------------
+
+    # No causal mask is required because the cache contains
+    # only previously seen positions and the current position.
+    attn = F.scaled_dot_product_attention(
+        q,
+        new_k,
+        new_v
+    )
+
+    # Restore shape (B, 1, d).
+    attn = (
+        attn.transpose(1, 2)
+        .contiguous()
+        .reshape(B, 1, d)
+    )
+
+    # Attention output projection and residual connection.
+    x = x + layer.out(attn)
+
+    # --------------------------------------------------
+    # 7. Apply the gated MLP
+    # --------------------------------------------------
+
+    t = layer.norm2(x)
+
+    mlp_out = (
+        F.silu(layer.fc1(t))
+        * layer.fc_gate(t)
+    )
+
+    # MLP output projection and residual connection.
+    out = x + layer.fc2(mlp_out)
+
+    return out, new_cache
+

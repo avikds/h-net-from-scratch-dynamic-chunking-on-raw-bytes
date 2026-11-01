@@ -41,6 +41,7 @@ python scaffold.py
 - [x] **29.** run_arm
 - [x] **30.** compression_summary
 - [x] **31.** mamba_step
+- [x] **32.** transformer_step
 
 ---
 
