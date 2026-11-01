@@ -1155,3 +1155,167 @@ def apply_rope(x, offset=0, theta=10000.0):
     # Concatenate the rotated halves.
     return torch.cat([first_half, second_half], dim=-1)
 
+# Step 16 - TransformerLayer
+class TransformerLayer(nn.Module):
+    """
+    Pre-norm Transformer layer with:
+    - Multi-head causal self-attention
+    - Rotary Positional Embeddings (RoPE)
+    - Gated MLP
+    - Residual connections
+    """
+
+    def __init__(self, d, heads=4, d_ff=None):
+        super().__init__()
+
+        # Validate the attention dimensions.
+        if d <= 0:
+            raise ValueError("d must be positive.")
+
+        if heads <= 0:
+            raise ValueError("heads must be positive.")
+
+        if d % heads != 0:
+            raise ValueError("d must be divisible by heads.")
+
+        # Dimension of each attention head.
+        self.heads = heads
+        self.hd = d // heads
+
+        # Default feed-forward dimension.
+        if d_ff is None:
+            d_ff = int(8 * d / 3)
+
+        if d_ff <= 0:
+            raise ValueError("d_ff must be positive.")
+
+        # --------------------------------------------------
+        # 1. Pre-normalization layers
+        # --------------------------------------------------
+
+        self.norm1 = RMSNorm(d)
+        self.norm2 = RMSNorm(d)
+
+        # --------------------------------------------------
+        # 2. Multi-head attention projections
+        # --------------------------------------------------
+
+        # Combined query, key and value projection.
+        self.qkv = nn.Linear(
+            d,
+            3 * d,
+            bias=False
+        )
+
+        # Attention output projection.
+        self.out = nn.Linear(
+            d,
+            d,
+            bias=False
+        )
+
+        # --------------------------------------------------
+        # 3. Gated MLP projections
+        # --------------------------------------------------
+
+        # First MLP projection.
+        self.fc1 = nn.Linear(
+            d,
+            d_ff,
+            bias=False
+        )
+
+        # Gating projection.
+        self.fc_gate = nn.Linear(
+            d,
+            d_ff,
+            bias=False
+        )
+
+        # MLP output projection.
+        self.fc2 = nn.Linear(
+            d_ff,
+            d,
+            bias=False
+        )
+
+    def forward(self, x):
+        """
+        Apply causal self-attention followed by a gated MLP.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, L, d).
+
+        Returns:
+            torch.Tensor: Output tensor of shape (B, L, d).
+        """
+
+        if x.ndim != 3:
+            raise ValueError("x must have shape (B, L, d).")
+
+        B, L, d = x.shape
+
+        if L == 0:
+            return x
+
+        if d != self.heads * self.hd:
+            raise ValueError("Input dimension does not match the layer.")
+
+        # --------------------------------------------------
+        # 1. Pre-normalization and QKV projection
+        # --------------------------------------------------
+
+        qkv = self.qkv(self.norm1(x))
+
+        # Split into query, key and value tensors.
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        # Reshape each tensor into (B, heads, L, head_dim).
+        q = q.reshape(B, L, self.heads, self.hd).transpose(1, 2)
+        k = k.reshape(B, L, self.heads, self.hd).transpose(1, 2)
+        v = v.reshape(B, L, self.heads, self.hd).transpose(1, 2)
+
+        # --------------------------------------------------
+        # 2. Apply Rotary Positional Embeddings
+        # --------------------------------------------------
+
+        # Rotate queries and keys, but not values.
+        q = apply_rope(q)
+        k = apply_rope(k)
+
+        # --------------------------------------------------
+        # 3. Causal multi-head self-attention
+        # --------------------------------------------------
+
+        attn = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True
+        )
+
+        # Restore the original shape (B, L, d).
+        attn = (
+            attn.transpose(1, 2)
+            .contiguous()
+            .reshape(B, L, d)
+        )
+
+        # Apply output projection and residual connection.
+        x = x + self.out(attn)
+
+        # --------------------------------------------------
+        # 4. Gated MLP with pre-normalization
+        # --------------------------------------------------
+
+        t = self.norm2(x)
+
+        # Apply the gated feed-forward transformation.
+        mlp_out = (
+            F.silu(self.fc1(t))
+            * self.fc_gate(t)
+        )
+
+        # Project back to dimension d and add residual.
+        return x + self.fc2(mlp_out)
+
