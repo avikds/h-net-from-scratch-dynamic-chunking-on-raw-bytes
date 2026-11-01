@@ -23,6 +23,7 @@ python scaffold.py
 - [x] **11.** ratio_loss
 - [x] **12.** RMSNorm
 - [x] **13.** ssd_scan
+- [x] **14.** MambaLayer
 
 ---
 

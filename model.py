@@ -848,3 +848,235 @@ def ssd_scan(u, dt, A, B_mat, C_mat, h0=None, chunk=64):
 
     return y, h
 
+# Step 14 - MambaLayer
+class MambaLayer(nn.Module):
+    """
+    Small Mamba-2 block with pre-normalization and a residual connection.
+    """
+
+    def __init__(
+        self,
+        d,
+        expand=2,
+        d_state=16,
+        d_conv=4,
+        head_dim=16,
+        chunk=64
+    ):
+        super().__init__()
+
+        # Validate architectural dimensions.
+        if d <= 0 or expand <= 0:
+            raise ValueError("d and expand must be positive.")
+
+        if d_state <= 0 or d_conv <= 0 or head_dim <= 0:
+            raise ValueError("d_state, d_conv and head_dim must be positive.")
+
+        if chunk <= 0:
+            raise ValueError("chunk must be positive.")
+
+        # Inner dimension and number of heads.
+        di = expand * d
+
+        if di % head_dim != 0:
+            raise ValueError(
+                "expand * d must be divisible by head_dim."
+            )
+
+        H = di // head_dim
+
+        # Store architectural dimensions.
+        self.di = di
+        self.H = H
+        self.head_dim = head_dim
+        self.d_state = d_state
+        self.d_conv = d_conv
+        self.chunk = chunk
+
+        # --------------------------------------------------
+        # 1. Normalization layers
+        # --------------------------------------------------
+
+        # Pre-normalization of the input.
+        self.norm = RMSNorm(d)
+
+        # Normalization of the gated output.
+        self.gate_norm = RMSNorm(di)
+
+        # --------------------------------------------------
+        # 2. Input projection
+        # --------------------------------------------------
+
+        # x is projected into:
+        # z:   di
+        # xbc: di + 2*d_state
+        # dt:  H
+        self.in_proj = nn.Linear(
+            d,
+            2 * di + 2 * d_state + H,
+            bias=False
+        )
+
+        # --------------------------------------------------
+        # 3. Causal depthwise convolution
+        # --------------------------------------------------
+
+        n = di + 2 * d_state
+
+        self.conv = nn.Conv1d(
+            n,
+            n,
+            kernel_size=d_conv,
+            groups=n,
+            padding=d_conv - 1
+        )
+
+        # --------------------------------------------------
+        # 4. Output projection
+        # --------------------------------------------------
+
+        self.out_proj = nn.Linear(
+            di,
+            d,
+            bias=False
+        )
+
+        # --------------------------------------------------
+        # 5. State transition initialization
+        # --------------------------------------------------
+
+        # Initialize A using log-uniformly sampled values
+        # from the interval [1, 16].
+        A_init = torch.empty(H).uniform_(1.0, 16.0)
+
+        self.log_a = nn.Parameter(torch.log(A_init))
+
+        # Sample initial time-step values from a log-uniform
+        # distribution between 0.001 and 0.1.
+        dt_init = torch.empty(H).uniform_(
+            math.log(0.001),
+            math.log(0.1)
+        ).exp()
+
+        # Inverse softplus:
+        # softplus(dt_bias) = dt_init.
+        # This is calculated in a numerically stable manner.
+        dt_bias_init = (
+            dt_init + torch.log(-torch.expm1(-dt_init))
+        )
+
+        self.dt_bias = nn.Parameter(dt_bias_init)
+
+    def forward(self, x):
+        """
+        Apply the Mamba-2 block.
+
+        Args:
+            x (torch.Tensor): Input of shape (B, L, d).
+
+        Returns:
+            torch.Tensor: Output of shape (B, L, d).
+        """
+
+        if x.ndim != 3:
+            raise ValueError("x must have shape (B, L, d).")
+
+        if x.shape[-1] != self.norm.weight.numel():
+            raise ValueError("Input feature dimension does not match d.")
+
+        B, L, _ = x.shape
+
+        # Nothing to process for an empty sequence.
+        if L == 0:
+            return x
+
+        # Keep the original input for the residual connection.
+        residual = x
+
+        # --------------------------------------------------
+        # 1. Normalize and project the input
+        # --------------------------------------------------
+
+        projected = self.in_proj(self.norm(x))
+
+        n = self.di + 2 * self.d_state
+
+        z, xbc, dt = torch.split(
+            projected,
+            [self.di, n, self.H],
+            dim=-1
+        )
+
+        # --------------------------------------------------
+        # 2. Causal depthwise convolution
+        # --------------------------------------------------
+
+        # Conv1d expects (B, channels, L).
+        xbc = xbc.transpose(1, 2)
+
+        # Apply convolution and retain only the first L positions.
+        # This removes the right-padding outputs and ensures causality.
+        xbc = self.conv(xbc)[..., :L]
+
+        # Restore shape (B, L, channels).
+        xbc = xbc.transpose(1, 2)
+
+        # Apply SiLU activation.
+        xbc = F.silu(xbc)
+
+        # Split into input, input-state and output-state vectors.
+        u, B_mat, C_mat = torch.split(
+            xbc,
+            [self.di, self.d_state, self.d_state],
+            dim=-1
+        )
+
+        # --------------------------------------------------
+        # 3. State-space scan
+        # --------------------------------------------------
+
+        # Convert time-step values using softplus.
+        dt = F.softplus(dt + self.dt_bias)
+
+        # State transition parameters must be negative.
+        A = -torch.exp(self.log_a)
+
+        # Reshape the input into multiple heads.
+        u = u.reshape(
+            B,
+            L,
+            self.H,
+            self.head_dim
+        )
+
+        # Execute the chunked Mamba-2 SSD scan.
+        y, _ = ssd_scan(
+            u,
+            dt,
+            A,
+            B_mat,
+            C_mat,
+            chunk=self.chunk
+        )
+
+        # Flatten the heads back into the inner dimension.
+        y = y.reshape(B, L, self.di)
+
+        # --------------------------------------------------
+        # 4. Gating and output projection
+        # --------------------------------------------------
+
+        # Apply SiLU gating and RMS normalization.
+        gated = self.gate_norm(
+            y * F.silu(z)
+        )
+
+        # Project back to the original dimension.
+        out = self.out_proj(gated)
+
+        # --------------------------------------------------
+        # 5. Residual connection
+        # --------------------------------------------------
+
+        return residual + out
+
