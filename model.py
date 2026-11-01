@@ -2740,3 +2740,82 @@ def train_hnet(
         "trace": trace
     }
 
+# Step 27 - IndependentRouter
+class IndependentRouter(nn.Module):
+    """
+    Independent boundary router.
+
+    Predicts each boundary using only the current hidden-state
+    vector, without comparing adjacent vectors using cosine similarity.
+    """
+
+    def __init__(self, d):
+        super().__init__()
+
+        # Predict one boundary logit from each individual vector.
+        self.lin = nn.Linear(d, 1)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, L, d).
+            mask (torch.Tensor, optional): Boolean mask of shape (B, L).
+
+        Returns:
+            p (torch.Tensor): Boundary probabilities of shape (B, L).
+            b (torch.Tensor): Boolean boundary decisions of shape (B, L).
+        """
+
+        if x.ndim != 3:
+            raise ValueError("x must have shape (B, L, d).")
+
+        B, L, d = x.shape
+
+        if d != self.lin.in_features:
+            raise ValueError("Input feature dimension does not match d.")
+
+        if mask is not None:
+            if mask.shape != (B, L):
+                raise ValueError("mask must have shape (B, L).")
+
+            if mask.dtype != torch.bool:
+                raise TypeError("mask must be a boolean tensor.")
+
+            if mask.device != x.device:
+                raise ValueError("mask and x must be on the same device.")
+
+        # Handle empty sequences.
+        if L == 0:
+            p = x.new_empty((B, 0))
+            b = torch.empty(
+                (B, 0),
+                dtype=torch.bool,
+                device=x.device
+            )
+            return p, b
+
+        # The first position is always assigned probability 1.
+        first_prob = x.new_ones((B, 1))
+
+        # Predict probabilities independently for positions 1 to L-1.
+        if L > 1:
+            remaining_prob = torch.sigmoid(
+                self.lin(x[:, 1:, :])
+            ).squeeze(-1)
+
+            p = torch.cat(
+                [first_prob, remaining_prob],
+                dim=1
+            )
+        else:
+            p = first_prob
+
+        # Convert probabilities into binary boundary decisions.
+        b = p >= 0.5
+
+        # Suppress boundaries at masked positions.
+        if mask is not None:
+            b = b & mask
+
+        return p, b
+
