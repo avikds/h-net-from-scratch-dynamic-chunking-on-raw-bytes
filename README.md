@@ -48,6 +48,31 @@ python scaffold.py
 - [x] **36.** boundary_view
 - [x] **37.** boundary_alignment
 
----
+## Results
 
-Built on Deep-ML.
+```
+19,447,282 bytes of TinyStories; training on 1,024,000 bytes (500 steps of 16 x 128)
+
+1. Same compute per byte, different chunkers
+arm            bits/byte  bytes/chunk  kFLOPs/byte   params   sec
+byte               1.758         1.00        231.8   106844   111
+pool               1.981         4.92        250.5   383584    77
+space              1.875         4.99        248.4   383584    76
+dynamic            1.939         5.01        248.1   383584    87
+no_smoothing       1.976         5.08        246.1   383584    86
+
+2. Compression in the second half of training (target 6)
+dynamic        mean 4.79 bytes per chunk, spread 0.32, 80% of the target
+no_smoothing   mean 4.91 bytes per chunk, spread 0.54, 82% of the target
+
+3. The streaming step reproduces the full forward
+largest logit difference 1.3e-05; main network ran on 19 of 128 bytes; same boundaries as the full forward: True
+
+4. What the router learned
+clean (26 chunks in 91 bytes): Once u|pon a| tim|e|,| |t|h|ere was a| |littl|e gi|rl name|d Lily|. |Sh|e lo|v|ed to play |ou|t|sid|e in t|h|e sun|.
+spaces removed (20 chunks in 73 bytes): Onceuponatime|,|th|erewasalittl|e|girlname|d|Lily|.S|h|e|lo|v|edto|playout|sid|ei|nth|esun|.
+on held-out text: 19% of boundaries are on a space-like boundary, 5% are one byte after it, and they catch 18% of the space-like boundaries
+
+Total 464 s. Ranking at this length is not the result: see the project description for the seed sweep.
+The paper's claim is about 100B tokens; here the budget is about 1 MB.
+```
