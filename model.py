@@ -2907,3 +2907,129 @@ def arm_config(name, N=6):
         "chunker": chunker
     }
 
+# Step 29 - run_arm
+def run_arm(
+    name,
+    train_data,
+    val_data,
+    steps,
+    seed=0,
+    lr=4e-3,
+    N=6,
+    batch_size=16,
+    seq_len=128,
+    log_every=0
+):
+    """
+    Train and evaluate one experimental H-Net arm.
+
+    Args:
+        name (str): Experiment arm name.
+        train_data (torch.Tensor): Training corpus as raw bytes.
+        val_data (torch.Tensor): Validation corpus as raw bytes.
+        steps (int): Number of training steps.
+        seed (int): Random initialization and training seed.
+        lr (float): Base learning rate.
+        N (int): Target compression factor.
+        batch_size (int): Training batch size.
+        seq_len (int): Sequence length.
+        log_every (int): Training statistics logging interval.
+
+    Returns:
+        dict: Experiment results containing:
+            name
+            seed
+            bpb
+            bytes_per_chunk
+            kflops_per_byte
+            params
+            seconds
+            trace
+            model
+    """
+
+    # --------------------------------------------------
+    # 1. Obtain the experiment configuration
+    # --------------------------------------------------
+
+    c = arm_config(name, N)
+
+    # --------------------------------------------------
+    # 2. Initialize the model reproducibly
+    # --------------------------------------------------
+
+    # Set the random seed immediately before model construction.
+    torch.manual_seed(seed)
+
+    model = HNetLM(
+        c["layout"],
+        c["widths"],
+        c["targets"],
+        c["cfg"]
+    )
+
+    # Count all trainable model parameters.
+    params = sum(
+        p.numel()
+        for p in model.parameters()
+    )
+
+    # --------------------------------------------------
+    # 3. Train the model
+    # --------------------------------------------------
+
+    train_result = train_hnet(
+        model,
+        train_data,
+        steps,
+        chunker=c["chunker"],
+        batch_size=batch_size,
+        seq_len=seq_len,
+        lr=lr,
+        seed=seed,
+        log_every=log_every
+    )
+
+    # --------------------------------------------------
+    # 4. Evaluate held-out bits per byte and compression
+    # --------------------------------------------------
+
+    eval_result = evaluate_bpb(
+        model,
+        val_data,
+        c["chunker"],
+        seq_len=seq_len
+    )
+
+    bpb = eval_result["bpb"]
+    bytes_per_chunk = eval_result["bytes_per_chunk"]
+
+    # --------------------------------------------------
+    # 5. Calculate computational cost per input byte
+    # --------------------------------------------------
+
+    kflops_per_byte = (
+        flops_per_byte(
+            c["layout"],
+            c["widths"],
+            bytes_per_chunk,
+            seq_len=seq_len
+        ) / 1000.0
+    )
+
+    # --------------------------------------------------
+    # 6. Return the complete experiment results
+    # --------------------------------------------------
+
+    return {
+        "name": name,
+        "seed": seed,
+        "bpb": bpb,
+        "bytes_per_chunk": bytes_per_chunk,
+        "kflops_per_byte": float(kflops_per_byte),
+        "params": params,
+        "seconds": train_result["seconds"],
+        "trace": train_result["trace"],
+        "model": model
+    }
+
