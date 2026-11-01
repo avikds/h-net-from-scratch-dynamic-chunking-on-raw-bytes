@@ -39,6 +39,7 @@ python scaffold.py
 - [x] **27.** IndependentRouter
 - [x] **28.** arm_config
 - [x] **29.** run_arm
+- [x] **30.** compression_summary
 
 ---
 

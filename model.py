@@ -3033,3 +3033,56 @@ def run_arm(
         "model": model
     }
 
+# Step 30 - compression_summary
+import statistics
+
+
+def compression_summary(trace, target, stage=0):
+    """
+    Summarize compression stability and deviation from the target.
+
+    Args:
+        trace (list): Training trace returned by train_hnet().
+        target (float): Desired compression ratio.
+        stage (int): Index of the chunking stage.
+
+    Returns:
+        dict: Contains mean, population standard deviation
+              and compression gap as Python floats.
+    """
+
+    if target <= 0:
+        raise ValueError("target must be positive.")
+
+    if not isinstance(stage, int) or isinstance(stage, bool) or stage < 0:
+        raise ValueError("stage must be a non-negative integer.")
+
+    # Select the second half of the training trace.
+    second_half = trace[len(trace) // 2:]
+
+    # Extract compression measurements for the requested stage.
+    values = [
+        float(entry["bytes_per_chunk"][stage])
+        for entry in second_half
+    ]
+
+    if not values:
+        raise ValueError(
+            "The second half of the trace contains no compression values."
+        )
+
+    # Calculate the mean compression ratio.
+    mean_value = statistics.mean(values)
+
+    # Calculate population standard deviation.
+    std_value = statistics.pstdev(values)
+
+    # Calculate deviation from the target compression ratio.
+    gap = mean_value / target
+
+    return {
+        "mean": float(mean_value),
+        "std": float(std_value),
+        "gap": float(gap)
+    }
+
