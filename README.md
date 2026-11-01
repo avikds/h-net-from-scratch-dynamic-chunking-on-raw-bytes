@@ -20,6 +20,7 @@ python scaffold.py
 - [x] **8.** smooth_chunks
 - [x] **9.** causal_upsample
 - [x] **10.** straight_through_confidence
+- [x] **11.** ratio_loss
 
 ---
 

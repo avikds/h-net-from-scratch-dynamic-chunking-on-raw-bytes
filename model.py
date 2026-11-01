@@ -520,3 +520,75 @@ def straight_through_confidence(p, b):
 
     return s
 
+# Step 11 - ratio_loss
+def ratio_loss(p, b, N, mask=None):
+    """
+    Calculate the dynamic chunking ratio loss (Equation 10).
+
+    Args:
+        p (torch.Tensor): Floating-point boundary probabilities.
+        b (torch.Tensor): Boolean boundary decisions.
+        N (int or float): Target compression factor (must be > 1).
+        mask (torch.Tensor, optional): Boolean mask identifying valid
+                                       positions.
+
+    Returns:
+        torch.Tensor: Scalar ratio loss with gradients through p.
+    """
+
+    # Validate inputs.
+    if p.shape != b.shape:
+        raise ValueError("p and b must have the same shape.")
+
+    if not p.is_floating_point():
+        raise TypeError("p must be a floating-point tensor.")
+
+    if b.dtype != torch.bool:
+        raise TypeError("b must be a boolean tensor.")
+
+    if p.device != b.device:
+        raise ValueError("p and b must be on the same device.")
+
+    if N <= 1:
+        raise ValueError("N must be greater than 1.")
+
+    # Apply the optional mask to select valid positions.
+    if mask is not None:
+        if mask.shape != p.shape:
+            raise ValueError("mask must have the same shape as p.")
+
+        if mask.dtype != torch.bool:
+            raise TypeError("mask must be a boolean tensor.")
+
+        if mask.device != p.device:
+            raise ValueError("mask must be on the same device as p.")
+
+        p_valid = p[mask]
+        b_valid = b[mask]
+
+    else:
+        p_valid = p.reshape(-1)
+        b_valid = b.reshape(-1)
+
+    # Ensure that at least one valid position exists.
+    if p_valid.numel() == 0:
+        raise ValueError("At least one valid position is required.")
+
+    # F = mean of binary boundary decisions.
+    # Since b is boolean, F does not carry gradients.
+    F_ratio = b_valid.to(dtype=p.dtype).mean()
+
+    # G = mean of predicted boundary probabilities.
+    # Gradients must flow through G to train the router.
+    G_ratio = p_valid.mean()
+
+    # Implement Equation 10.
+    loss = (
+        N / (N - 1)
+    ) * (
+        (N - 1) * F_ratio * G_ratio
+        + (1 - F_ratio) * (1 - G_ratio)
+    )
+
+    return loss
+
